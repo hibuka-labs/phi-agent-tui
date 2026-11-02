@@ -2132,8 +2132,15 @@ fn mention_lines_mark_kinds_and_elide_long_names() {
         |i: usize| -> String { rows[i].spans.iter().map(|s| s.content.as_ref()).collect() };
 
     // Row 0 is the synthetic "use what I typed" row: the typed prefix itself
-    // (21 columns) still fits the 26-column budget, so it is left whole.
-    assert_eq!(row_text(0), "» deep/nested/dir/a_very");
+    // (21 columns) still fits the 26-column budget, so it is left whole. The
+    // path is rendered with the platform separator (a PathBuf's own form), so
+    // the expectation follows the OS rather than a hard-coded slash.
+    let sep = std::path::MAIN_SEPARATOR;
+    assert_eq!(
+        row_text(0),
+        format!("» deep{sep}nested{sep}dir{sep}a_very"),
+        "typed prefix echoed verbatim"
+    );
 
     // Row 1 is the matching file: its 29-column name is elided into the
     // 25-column budget (30 − gutter 2 − marker 3).

@@ -2332,7 +2332,7 @@ fn dotdot_prefix_inserts_absolute_parent_path() {
     let text = app.composer.text();
     assert!(!text.contains('@'), "composer holds the path, got {text:?}");
     assert!(
-        text.starts_with('/'),
+        std::path::Path::new(&text).is_absolute(),
         "outside path is absolute, got {text:?}"
     );
 }
