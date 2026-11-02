@@ -1,0 +1,43 @@
+# Changelog
+
+All notable changes to phi-agent-tui.
+
+## [Unreleased]
+
+## [0.1.0] — 2026-11-02
+
+First release: the terminal-app shell extracted from phimint's TUI as a
+reusable framework crate.
+
+### Added
+
+- `ShellSpec` (data config) + `ShellHandles` (live objects) wire-up and
+  `run(spec, agent, handles)` — the product assembles its own
+  `phi_agent::PhiAgent`; the shell never builds an agent.
+- Event loop with input pump, turn submission discipline (Esc/Enter duality,
+  queued steering, held slash commands), and periodic self-heals (terminal
+  size, raw-mode).
+- Transcript translation and rendering over `phi-tui`, with the mouse
+  hit-testing protocol and a semantic `Theme` (class-name tokens resolved at
+  render time; defaults are the reference product's palette).
+- Approval/ask interaction machinery: queue, popup, timeout, Esc/Enter
+  discipline, two-key consent gate. Mechanism only — grading tables and risk
+  wording stay product-side (`CopyTable` / `ApprovalCopy` wording slots).
+- Session picker skeleton and resume support behind `Option<SessionIo>`
+  (`None` = the product is not session-based: `/resume` has no row, no
+  picker, no replay).
+- Panel tiers: shallow event synthesis (synthetic turns with the
+  idle-only timing invariant), middle layout slots (tips band, status-band
+  face), deep view modes (`task_panel`, pickers).
+- Synthetic-turn delivery policies: `bg_wake` (background-task auto-wake with
+  hold/batch/quiet-window/report-once) and `child_results` (child-report
+  fan-in batching).
+- Product hook slots (update check, tips, notices, title generation, skill
+  bridge, submit/reopen/session boot/end, panel tick) — every hook runs
+  behind a guard: a panicking hook degrades to a documented fallback and
+  leaves a flipbook trace instead of killing the event loop.
+- Flipbook instrumentation (`frame_log`), exit transcript replay
+  (`exit_dump`), and Unix termios self-heal (`term_guard`).
+
+[Unreleased]: https://github.com/hibuka-labs/phi-agent-tui/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/hibuka-labs/phi-agent-tui/releases/tag/v0.1.0
