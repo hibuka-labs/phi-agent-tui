@@ -88,6 +88,9 @@ jobs:
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
+        # Best-effort: a repo without a CODECOV_TOKEN secret must not fail the
+        # build on the upload alone. The coverage *gate* above still fails it.
+        continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
