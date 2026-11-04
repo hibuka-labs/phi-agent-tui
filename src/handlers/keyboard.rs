@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::app::{Action, App, FocusTarget};
+use crate::app::{Action, App};
 use phi_agent::ApprovalDecision;
 use phi_kernel_tools::background_shell::BackgroundTaskStatus;
 
@@ -275,9 +275,22 @@ impl App {
                 self.result_tier = self.result_tier.next();
                 None
             }
+            // Ctrl+T: toggle the task frame — closed opens it and enters the
+            // list (D10 landing), open collapses it (single meaning, no third
+            // state). Collapsing returns focus to the input box, so the main
+            // output area goes back to the root transcript with it.
+            Char(c) if ctrl && c == self.keymap.task_panel_toggle => {
+                self.toggle_task_panel();
+                None
+            }
             Esc => {
-                // No menu is open here (handled above); clear a selection if
-                // present, else clear the composer.
+                // D8: in S2 the first Esc only drops the selection back to
+                // S1 — navigation keys never touch the (invisible) draft.
+                // Input's Esc keeps its meaning: clear selection, else clear
+                // the composer (the draft is on screen there).
+                if self.task_list_escape() {
+                    return None;
+                }
                 if self.selection_state.selection.is_some() {
                     self.selection_state.selection = None;
                 } else {
@@ -361,67 +374,58 @@ impl App {
                 if self.composer.cursor().0 == 0 && !self.queued_steer.is_empty() {
                     return Some(Action::TakeBackQueued);
                 }
-                // Handle task panel navigation
+                // The existing enter-list key: at the composer (S0/S1) it
+                // opens/enters the list at the D10 landing; in S2 it moves
+                // the selection up (stops at row 0).
                 if self.should_show_task_panel() {
-                    match &self.task_panel.focus {
-                        FocusTarget::TaskList(index) => {
-                            if *index > 0 {
-                                self.task_panel.focus = FocusTarget::TaskList(index - 1);
-                            }
-                            return None;
-                        }
-                        FocusTarget::Input => {
-                            // Move focus to the task list (select last row).
-                            // Rows are the combined model: sub-agents then
-                            // background shell tasks.
-                            let total = self.task_row_count();
-                            if total > 0 {
-                                self.task_panel.focus = FocusTarget::TaskList(total - 1);
-                                return None;
-                            }
-                        }
-                    }
+                    self.task_list_up();
+                    return None;
                 }
                 self.composer.move_up();
                 None
             }
             Down => {
-                // Handle task panel navigation
-                if self.should_show_task_panel() {
-                    match &self.task_panel.focus {
-                        FocusTarget::TaskList(index) => {
-                            // Combined rows: sub-agents then background tasks.
-                            let total = self.task_row_count();
-                            if *index + 1 < total {
-                                self.task_panel.focus = FocusTarget::TaskList(index + 1);
-                            } else {
-                                // Move focus to input
-                                self.task_panel.focus = FocusTarget::Input;
-                            }
-                            return None;
-                        }
-                        FocusTarget::Input => {
-                            // Already at input, do nothing
-                            return None;
-                        }
-                    }
+                // Task-list ↓ is S2-only (边界键全表): one row down, or back
+                // to S1 past the full list's last row. In S0/S1 the key is
+                // inert for the panel and falls through to the composer.
+                if matches!(self.task_panel.focus, crate::app::FocusTarget::TaskList(_)) {
+                    self.task_list_down();
+                    return None;
                 }
                 self.composer.move_down();
                 None
             }
             Home => {
+                if matches!(self.task_panel.focus, crate::app::FocusTarget::TaskList(_)) {
+                    self.task_list_home_end(true);
+                    return None;
+                }
                 self.composer.move_home();
                 None
             }
             End => {
+                if matches!(self.task_panel.focus, crate::app::FocusTarget::TaskList(_)) {
+                    self.task_list_home_end(false);
+                    return None;
+                }
                 self.composer.move_end();
                 None
             }
             PageUp => {
+                // S2: page the selection (the window follows). Elsewhere the
+                // key scrolls the transcript as always.
+                if matches!(self.task_panel.focus, crate::app::FocusTarget::TaskList(_)) {
+                    self.task_list_page(true);
+                    return None;
+                }
                 self.scroll_up();
                 None
             }
             PageDown => {
+                if matches!(self.task_panel.focus, crate::app::FocusTarget::TaskList(_)) {
+                    self.task_list_page(false);
+                    return None;
+                }
                 self.scroll_down();
                 None
             }

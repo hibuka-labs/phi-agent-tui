@@ -38,6 +38,7 @@ use super::shell::{
     ShellSpec, SkillBridge, TickFacts, TickOut, UpdateSlot, hook_guard, hook_guard_async,
     slash_picker_rows,
 };
+use super::task_layout;
 #[cfg(unix)]
 use super::term_guard;
 
@@ -524,6 +525,10 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
             // copy.
             let fresh = drop_already_shown(&archived, messages);
             replay_messages_to_transcript(&mut app, &archived, fresh);
+            // Rows are runtime-only (the frame restarts at S0/empty), but the
+            // permanent ledger markers rode the replay — rebuild the session-
+            // cumulative counts from them (对账式: ✓+✗+— = terminal markers).
+            app.recount_task_ledger();
             if !messages.is_empty() || !archived.is_empty() {
                 // Digest goes AFTER the replay block: the viewport follows the
                 // bottom, so this lands on the visible last screen — right
@@ -664,15 +669,35 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
             // Drain child-result events from the watcher task.
             if let Some(rx) = child_result_rx.as_mut() {
                 while let Ok(cr) = rx.try_recv() {
-                    // Task-panel bookkeeping: a finished child flips its panel
-                    // entry to done and refreshes the Waiting count. Must happen
-                    // before routing so the status strip is current this frame.
-                    if let ChildResultEvent::Progress {
-                        agent_path, status, ..
-                    } = &cr
-                        && status != "running"
-                    {
-                        app.mark_sub_agent_finished(agent_path);
+                    // Task-panel bookkeeping: the wire carries each child's
+                    // outcome kind (ok/error/closed) — finalize the row (ledger
+                    // marker + counts) and refresh the Waiting count. Must
+                    // happen before routing so the status strip is current
+                    // this frame, and before the Inject route's catch-all
+                    // sweep can launder an unreported kind.
+                    match &cr {
+                        ChildResultEvent::Progress {
+                            agent_path,
+                            status,
+                            summary,
+                        } => {
+                            if let Some(kind) = task_layout::wire_status(status, summary.as_deref())
+                            {
+                                app.mark_sub_agent_finished(agent_path, kind);
+                            }
+                        }
+                        ChildResultEvent::Batch { reports } => {
+                            // Backstop per report: the Progress events
+                            // already finalized these rows; finalize is
+                            // idempotent, so no double ledger lines.
+                            for r in reports {
+                                if let Some(kind) =
+                                    task_layout::wire_status(&r.status, r.result.as_deref())
+                                {
+                                    app.mark_sub_agent_finished(&r.agent_path, kind);
+                                }
+                            }
+                        }
                     }
                     let route = child_results.on_event(app.running, cr);
                     tracing::info!(

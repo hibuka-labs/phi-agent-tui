@@ -15,11 +15,14 @@ use phi_tui::lines::{LineKind, OutputLine};
 use phi_tui::stream::StreamState;
 use phi_tui::transcript::DEFAULT_WRAP_WIDTH;
 
+use crate::app::{AgentStatus, App, BackgroundTaskEntry, Phase, SubAgentState, SubAgentStatus};
+use crate::task_focus::FocusTarget;
+use crate::task_layout::{
+    LeadPieces, LedgerMark, StatusFit, TaskCounts, TaskSegment, compose_status, fit_status,
+    ledger_line, parse_ledger_marker,
+};
 use crate::theme::ShellToken;
 
-use super::app::{
-    AgentStatus, App, BackgroundTaskEntry, FocusTarget, SubAgentState, SubAgentStatus,
-};
 use super::bg_wake::{MAX_TAIL_PER_TASK, may_reap};
 
 /// How long a completed background task stays visible in the panel before
@@ -27,6 +30,12 @@ use super::bg_wake::{MAX_TAIL_PER_TASK, may_reap};
 /// refuses to resurrect terminal snapshots already past this window) so the
 /// two thresholds can never drift apart.
 const BACKGROUND_REAP_AFTER: Duration = Duration::from_secs(3);
+
+/// Row lifetime after completion: Done/Cancelled rows get the 3s review
+/// window, Failed rows stay 30s — a failure is the row the user most needs
+/// to see, and 3s is a glance (design F8).
+const REAP_AFTER_DONE: Duration = Duration::from_secs(3);
+const REAP_AFTER_FAILED: Duration = Duration::from_secs(30);
 
 /// Live state for the thinking panel of the focused agent: pre-wrapped tail
 /// lines (unprefixed — the panel title owns agent attribution), the agent id
@@ -37,7 +46,7 @@ pub(crate) struct ThinkingPanelState {
     pub(crate) chars: usize,
 }
 
-/// One row of the combined task panel: sub-agents first (map order), then
+/// One row of the combined task panel: sub-agents first (spawn order), then
 /// background shell tasks. `FocusTarget::TaskList(i)` indexes this order —
 /// every consumer (render, keyboard nav, focus clamping) must agree on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,26 +84,109 @@ impl App {
         (bounded, daemons)
     }
 
-    /// A sub-agent finished (watcher Progress event): mark it done in the task
-    /// panel and, while in the `Waiting` state, refresh the remaining count.
-    pub fn mark_sub_agent_finished(&mut self, agent_path: &str) {
-        if let Some(state) = self.sub_agents.get_mut(agent_path)
-            && state.status == SubAgentStatus::Running
-        {
-            state.status = SubAgentStatus::Done;
-            state.completed_at = Some(std::time::Instant::now());
+    /// The single terminal site for a sub-agent run (ENG-F1: engine events
+    /// carry no outcome — the watcher wire, the lifecycle snapshot and the
+    /// cancel path all land here). Idempotent: only a Running row flips, so a
+    /// fact delivered twice (Progress then Batch) records once.
+    ///
+    /// On the flip it writes the run's **permanent** ledger marker into the
+    /// root transcript (grep-able after the row is reaped) and the same text
+    /// as the child transcript's verdict, records the counts ledger, and —
+    /// for the first failure while collapsed — arms the auto-expand.
+    pub(crate) fn finalize_sub_agent(&mut self, agent_path: &str, status: SubAgentStatus) {
+        if matches!(status, SubAgentStatus::Running) {
+            return; // not a terminal
         }
+        let Some(state) = self.sub_agents.get_mut(agent_path) else {
+            return; // unknown row — nothing to finalize
+        };
+        if !matches!(state.status, SubAgentStatus::Running) {
+            return; // already terminal (idempotent)
+        }
+        let elapsed = state.started_at.elapsed();
+        state.status = status.clone();
+        state.completed_at = Some(Instant::now());
+
+        // The verdict follows the child's prose: flush its stream first.
+        let flushed = self.flush_child_stream(agent_path);
+        let verdict = ledger_line(agent_path, &status, elapsed);
+        let child = self
+            .sub_agent_transcripts
+            .entry(agent_path.to_string())
+            .or_default();
+        child.extend(flushed);
+        child.push(OutputLine {
+            spans: None,
+            original: None,
+            detail: None,
+            text: verdict.clone(),
+            kind: LineKind::Tool,
+            tool_state: None,
+        });
+        // Root ledger marker — any pending root text precedes it.
+        self.flush_pending();
+        self.transcript.push(OutputLine {
+            spans: None,
+            original: None,
+            detail: None,
+            text: verdict,
+            kind: LineKind::Tool,
+            tool_state: None,
+        });
+
+        self.task_panel.counts.record(&status);
+        if matches!(status, SubAgentStatus::Failed { .. }) {
+            self.task_panel.unacked_failures += 1;
+            self.arm_auto_expand(agent_path);
+        }
+        self.refresh_waiting_count();
+        self.sync_task_window();
+    }
+
+    /// Failure auto-expand (design detail 3 / F5): the first failure while
+    /// collapsed pops the frame open to **S1** (no focus steal) with the
+    /// window anchored to the failed row so it lands inside the 6-row window.
+    /// At most one pop per turn; a manual collapse outranks it (F9).
+    fn arm_auto_expand(&mut self, failed_path: &str) {
+        if self.task_panel.frame_open
+            || self.task_panel.popped_this_turn
+            || self.task_panel.user_collapsed_this_turn
+        {
+            return;
+        }
+        // F5 fallback: the failed row may already be gone — anchor the tail.
+        let anchor = self
+            .task_rows()
+            .iter()
+            .position(|r| matches!(r, TaskRow::SubAgent(p) if p == failed_path));
+        self.task_panel.frame_open = true;
+        self.task_panel.popped_this_turn = true;
+        self.task_panel.s1_anchor = anchor;
+        self.sync_task_window();
+    }
+
+    /// A sub-agent run reached a terminal state (watcher Progress/Batch,
+    /// `RunCancelled`, lifecycle fact). Routes through
+    /// [`Self::finalize_sub_agent`]. Always refreshes the wait count, even for
+    /// an unknown id — the refresh is itself a contract (callers can force one
+    /// with a no-op id after touching the background table).
+    pub fn mark_sub_agent_finished(&mut self, agent_path: &str, status: SubAgentStatus) {
+        self.finalize_sub_agent(agent_path, status);
         self.refresh_waiting_count();
     }
 
-    /// All pending sub-agents finished (batch injection): mark every still-
-    /// running entry done so the 3s auto-cleanup can sweep the panel.
+    /// Catch-all sweep (batch injection): every still-running entry is
+    /// finalized `Done` — the per-report paths have already recorded their
+    /// real kinds, so what remains has no better fact.
     pub fn mark_all_sub_agents_finished(&mut self) {
-        for state in self.sub_agents.values_mut() {
-            if state.status == SubAgentStatus::Running {
-                state.status = SubAgentStatus::Done;
-                state.completed_at = Some(std::time::Instant::now());
-            }
+        let running: Vec<String> = self
+            .sub_agents
+            .iter()
+            .filter(|(_, s)| matches!(s.status, SubAgentStatus::Running))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in running {
+            self.finalize_sub_agent(&p, SubAgentStatus::Done);
         }
         self.refresh_waiting_count();
     }
@@ -157,13 +249,20 @@ impl App {
         }
     }
 
-    /// The combined panel row order: sub-agents (map order) first, then
-    /// background shell tasks. Built fresh per call — the panel is a handful
-    /// of rows, and a shared list would be one more thing to keep in sync.
+    /// The combined panel row order: sub-agents in **spawn order** (a row
+    /// must never jump under the cursor — design detail 3; tie-broken by
+    /// path for same-instant spawns), then background shell tasks (registry
+    /// id order). Built fresh per call — the panel is a handful of rows, and
+    /// a shared list would be one more thing to keep in sync.
     pub(crate) fn task_rows(&self) -> Vec<TaskRow> {
-        self.sub_agents
-            .keys()
-            .map(|k| TaskRow::SubAgent(k.clone()))
+        let mut subs: Vec<(Instant, &str)> = self
+            .sub_agents
+            .iter()
+            .map(|(k, s)| (s.started_at, k.as_str()))
+            .collect();
+        subs.sort_unstable();
+        subs.into_iter()
+            .map(|(_, k)| TaskRow::SubAgent(k.to_string()))
             .chain(
                 self.background_tasks
                     .keys()
@@ -303,13 +402,12 @@ impl App {
         }
 
         // Auto-reap completed background tasks (Done/TimedOut/Cancelled/Error)
-        // after 3 seconds, but only when root is Idle and not inspecting.
+        // after 3 seconds, but only when root is Idle and the task frame is
+        // closed (框开 = 冻结回收 — S1 included; S2 is a subset of frame_open).
         // We reap regardless of whether the task is still in the registry,
         // because the registry's GC TTL (5 min) is much longer than our
         // desired panel display time (3s).
-        if matches!(self.status, AgentStatus::Idle)
-            && !matches!(self.task_panel.focus, FocusTarget::TaskList(_))
-        {
+        if matches!(self.status, AgentStatus::Idle) && !self.task_panel.frame_open {
             let now = Instant::now();
             let reap_ids: Vec<String> = self
                 .background_tasks
@@ -339,67 +437,92 @@ impl App {
     }
 
     /// Reconcile the task panel against the registry's authoritative fact
-    /// snapshot (Phase 5: `subscribe_lifecycle` watch → `TuiEvent::Lifecycle`).
+    /// snapshot (`subscribe_lifecycle` watch → `TuiEvent::Lifecycle`).
     ///
-    /// Mapping (design doc `agent-state-machine-design.md` Phase 5):
-    /// `queued`/`running` → panel `Running`, `done` → panel `Done`,
-    /// disappearance (unregistration: normal exit after posting, or close)
-    /// → panel `Done`, never removal — the 3s reaper owns removal so the
-    /// user keeps the review window. Unknown `done` agents are ignored: a
-    /// freshly registered agent reads `done` until its first `send_task`,
-    /// and entries should appear with the first fact of real work, not as
-    /// phantom dones.
+    /// The registry's wire vocabulary is the sole state authority
+    /// (ENG-F1 形状 B), parsed via [`phi_agent::AgentStatus::from_name`]:
+    /// `queued`/`running` → create/reopen the row, `done` → Done, `failed` →
+    /// `Failed { last_error }`, `cancelled`/`closed` → Cancelled, `paused`/
+    /// unknown → **no fact** (the row keeps its state — never guess a
+    /// terminal from a word this build does not understand). A Running row
+    /// that simply vanished from the snapshot completed clean (its real
+    /// outcome already rode the watcher wire). Terminal facts for rows this
+    /// panel never saw are ignored (a freshly registered agent reads `done`
+    /// until its first `send_task`).
     pub(crate) fn apply_lifecycle_snapshot(&mut self, snap: &RegistrySnapshot) {
+        // Collect facts first — `finalize_sub_agent` takes `&mut self`.
+        let mut running_rows: Vec<String> = Vec::new();
+        let mut terminal_rows: Vec<(String, SubAgentStatus)> = Vec::new();
         for agent in &snap.agents {
-            let running_fact = matches!(agent.status.as_str(), "queued" | "running");
-            if running_fact {
-                // Creates the entry (with the `* started` transcript marker)
-                // at spawn time — before the child's first tool call, which
-                // is when the event-driven path used to discover it.
-                self.track_agent(Some(&agent.path));
-            }
-            if let Some(state) = self.sub_agents.get_mut(&agent.path) {
-                match (&state.status, running_fact) {
-                    (SubAgentStatus::Running, false) => {
-                        state.status = SubAgentStatus::Done;
-                        state.completed_at = Some(Instant::now());
-                    }
-                    (SubAgentStatus::Done, true) => {
-                        // Re-tasked (send_message trigger): reopen the entry.
-                        state.status = SubAgentStatus::Running;
-                        state.completed_at = None;
-                    }
-                    _ => {}
+            use phi_agent::AgentStatus as RegistryStatus;
+            match RegistryStatus::from_name(&agent.status) {
+                RegistryStatus::Queued | RegistryStatus::Running => {
+                    running_rows.push(agent.path.clone());
                 }
+                RegistryStatus::Done => {
+                    terminal_rows.push((agent.path.clone(), SubAgentStatus::Done));
+                }
+                RegistryStatus::Failed => {
+                    terminal_rows.push((
+                        agent.path.clone(),
+                        SubAgentStatus::Failed {
+                            summary: agent.last_error.clone().unwrap_or_default(),
+                        },
+                    ));
+                }
+                RegistryStatus::Cancelled | RegistryStatus::Closed => {
+                    terminal_rows.push((agent.path.clone(), SubAgentStatus::Cancelled));
+                }
+                RegistryStatus::Paused | RegistryStatus::Unknown => {}
             }
         }
-        // Tracked entries absent from the snapshot have unregistered.
+        for path in running_rows {
+            // Creates the entry (with the `* started` marker) at spawn time;
+            // a terminal row is reopened on re-tasking.
+            self.track_agent(Some(&path));
+            if let Some(state) = self.sub_agents.get_mut(&path)
+                && !matches!(state.status, SubAgentStatus::Running)
+            {
+                state.status = SubAgentStatus::Running;
+                state.completed_at = None;
+            }
+        }
+        for (path, status) in terminal_rows {
+            if self.sub_agents.contains_key(&path) {
+                self.finalize_sub_agent(&path, status);
+            }
+        }
+        // Tracked rows absent from the snapshot have unregistered: a Running
+        // row that vanished without a terminal fact completed clean.
         let live: std::collections::HashSet<&str> =
             snap.agents.iter().map(|a| a.path.as_str()).collect();
-        for (path, state) in self.sub_agents.iter_mut() {
-            if !live.contains(path.as_str()) && state.status == SubAgentStatus::Running {
-                state.status = SubAgentStatus::Done;
-                state.completed_at = Some(Instant::now());
-            }
+        let vanished: Vec<String> = self
+            .sub_agents
+            .iter()
+            .filter(|(path, state)| {
+                !live.contains(path.as_str()) && matches!(state.status, SubAgentStatus::Running)
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in vanished {
+            self.finalize_sub_agent(&path, SubAgentStatus::Done);
         }
         self.refresh_waiting_count();
     }
 
-    /// Remove completed sub-agents that have been done for more than 3 seconds.
-    /// Returns true if any agents were removed.
+    /// Remove completed sub-agents past their review window — 3s for
+    /// Done/Cancelled, 30s for Failed (F8: a failure is the row the user
+    /// most needs to see). Never while the root is busy (the finished
+    /// children's transcripts are the only review surface mid-run) and
+    /// never while the frame is open (框开 = 冻结回收 — reaping under the
+    /// user's eyes is the "can't see what the sub-agent did" bug).
+    /// Collapsing the frame calls this immediately, so rows already over-age
+    /// go the moment the user stops looking.
     pub fn cleanup_completed_agents(&mut self) -> bool {
-        // Only reap when the root is fully Idle. While the root is Waiting
-        // (children still running) the finished children's transcripts are the
-        // only place the user can review what they did — deleting them 3s after
-        // completion made sub-agent execution invisible (session 20260903 fan-in
-        // made "turn ends while children run" the norm, so this fired constantly).
         if !matches!(self.status, AgentStatus::Idle) {
             return false;
         }
-        // Likewise while the user is inspecting the task list: reaping under
-        // their eyes is exactly the "can't see what the sub-agent did" bug.
-        // Cleanup resumes once focus returns to the input box.
-        if matches!(self.task_panel.focus, FocusTarget::TaskList(_)) {
+        if self.task_panel.frame_open {
             return false;
         }
         let now = Instant::now();
@@ -408,10 +531,15 @@ impl App {
             .sub_agents
             .iter()
             .filter(|(_, state)| {
-                state.status == SubAgentStatus::Done
+                let ttl = if matches!(state.status, SubAgentStatus::Failed { .. }) {
+                    REAP_AFTER_FAILED
+                } else {
+                    REAP_AFTER_DONE
+                };
+                !matches!(state.status, SubAgentStatus::Running)
                     && state
                         .completed_at
-                        .is_some_and(|at| now.duration_since(at).as_secs() >= 3)
+                        .is_some_and(|at| now.duration_since(at) >= ttl)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -424,21 +552,28 @@ impl App {
             removed = true;
         }
 
-        // Reset focus if it's now out of bounds. The panel lists sub-agents
-        // and background rows (combined `task_row_count`); a stale index
-        // clamps to the new last row, or back to the input when empty.
-        let total = self.task_row_count();
-        if let FocusTarget::TaskList(index) = &self.task_panel.focus
-            && *index >= total
-        {
-            self.task_panel.focus = if total == 0 {
-                FocusTarget::Input
-            } else {
-                FocusTarget::TaskList(total - 1)
-            };
-        }
+        // Reset focus if it's now out of bounds (rows may have vanished).
+        self.clamp_task_focus();
+        self.sync_task_window();
 
         removed
+    }
+
+    /// Rebuild the counts ledger from the root transcript's permanent
+    /// markers (resume path: rows are runtime-only and start empty, but the
+    /// markers survived in the replay). Terminal markers only — ✓+✗+— always
+    /// equals the marker count (对账式).
+    pub fn recount_task_ledger(&mut self) {
+        let mut counts = TaskCounts::default();
+        for line in &self.transcript.output {
+            match parse_ledger_marker(&line.text) {
+                Some(LedgerMark::Done) => counts.done += 1,
+                Some(LedgerMark::Failed) => counts.failed += 1,
+                Some(LedgerMark::Cancelled) => counts.cancelled += 1,
+                None => {}
+            }
+        }
+        self.task_panel.counts = counts;
     }
 
     /// Commit any pending streaming text/thought into the transcript (thought
@@ -591,6 +726,157 @@ impl App {
     /// reports it (Ctrl+O folded view).
     pub(crate) fn thinking_panel_wanted(&self) -> bool {
         !self.show_thoughts && self.thinking_panel_state().is_some()
+    }
+
+    // ── Process-row composition (status line + squeeze ladder) ────────────
+
+    /// Status-strip text for tool calls whose arguments are still streaming
+    /// in — the calls themselves only materialize when the turn's stream
+    /// drains, so this is what the user sees during that window (session
+    /// 20261006_9264ba3e: four `spawn_agent` briefs, ~3.2K chars, ~25 s of
+    /// visible nothing). `None` while no draft is pending.
+    pub(crate) fn draft_status_text(&self) -> Option<String> {
+        if self.tool_drafts.is_empty() {
+            return None;
+        }
+        let chars: usize = self.tool_drafts.values().map(|(_, n)| n).sum();
+        if self.tool_drafts.len() == 1 {
+            let (name, _) = self.tool_drafts.values().next().expect("len == 1");
+            let tool = if name.is_empty() {
+                "tool call"
+            } else {
+                name.as_str()
+            };
+            Some(format!("writing {tool} ({chars} chars)..."))
+        } else {
+            Some(format!(
+                "writing {} tool calls ({chars} chars)...",
+                self.tool_drafts.len()
+            ))
+        }
+    }
+
+    /// The process row's lead (spinner/phase/waiting) split for the squeeze
+    /// ladder. Wording follows the bounded/daemon split: bounded jobs carry
+    /// a completion promise, daemons are merely counted — the two must never
+    /// share a "waiting for completion" promise.
+    pub(crate) fn status_leads(&self) -> LeadPieces {
+        let activity = self.activity_suffix();
+        let (head, tail) = match &self.status {
+            AgentStatus::Idle => {
+                let base = if let Some(n) = &self.notice {
+                    n.clone()
+                } else {
+                    "Idle".to_string()
+                };
+                let (_, daemons) = self.bg_running_split();
+                if daemons > 0 {
+                    (base, format!(" ({daemons} daemon(s))"))
+                } else {
+                    (base, String::new())
+                }
+            }
+            AgentStatus::Waiting { running, .. } => {
+                let (bounded, daemons) = self.bg_running_split();
+                let (head, promise) = match (*running, bounded) {
+                    (_, 0) => (
+                        format!(
+                            "{} waiting for sub-agents ({running} running)...",
+                            self.spinner_char()
+                        ),
+                        " auto-continue when results arrive".to_string(),
+                    ),
+                    (0, _) => (
+                        format!(
+                            "{} waiting for background tasks ({bounded} running)...",
+                            self.spinner_char()
+                        ),
+                        " auto-report when done".to_string(),
+                    ),
+                    (_, _) => (
+                        format!(
+                            "{} waiting for sub-agents ({running}) + background tasks ({bounded})...",
+                            self.spinner_char()
+                        ),
+                        " auto-continue when done".to_string(),
+                    ),
+                };
+                let tail = if daemons > 0 {
+                    format!("{promise} (+{daemons} daemon(s))")
+                } else {
+                    promise
+                };
+                (head, tail)
+            }
+            AgentStatus::Running { phase } => match phase {
+                Phase::Thinking => (
+                    format!("{} thinking...", self.spinner_char()),
+                    " (Ctrl+C cancel)".to_string(),
+                ),
+                Phase::Streaming => match self.draft_status_text() {
+                    // While tool-call args are being written there is no
+                    // delta to stream — report the draft instead of a bare
+                    // "streaming...", so the stretch reads as busy, not hung.
+                    Some(draft) => (
+                        format!("{} {draft}", self.spinner_char()),
+                        " (Ctrl+C cancel)".to_string(),
+                    ),
+                    None => (
+                        format!("{} streaming...", self.spinner_char()),
+                        " (Ctrl+C cancel)".to_string(),
+                    ),
+                },
+                Phase::ToolCall { tool } => match &self.live_progress {
+                    Some(p) => (
+                        format!("{} 🔧 {tool}: {p}", self.spinner_char()),
+                        String::new(),
+                    ),
+                    None => (
+                        format!("{} 🔧 {tool}", self.spinner_char()),
+                        " (Ctrl+C cancel)".to_string(),
+                    ),
+                },
+                Phase::AwaitingApproval => (
+                    "!! waiting approval...".to_string(),
+                    " (y/a/n, Ctrl+C cancel)".to_string(),
+                ),
+            },
+        };
+        LeadPieces {
+            head,
+            activity,
+            tail,
+            // Waiting/Idle tails are reassurance the ladder may shed; a
+            // phase's cancel hint must survive every stage.
+            tail_is_reassurance: !matches!(self.status, AgentStatus::Running { .. }),
+        }
+    }
+
+    /// The task segment appended to the process row — mounted once a session
+    /// has task history (rows now, or recorded counts). A session that has
+    /// never had a task renders its process row untouched.
+    pub(crate) fn task_segment(&self) -> TaskSegment {
+        TaskSegment {
+            counts: self.task_panel.counts,
+            running: self
+                .sub_agents
+                .values()
+                .filter(|s| matches!(s.status, SubAgentStatus::Running))
+                .count(),
+            frame_open: self.task_panel.frame_open,
+            show: self.task_panel.counts.total() > 0 || self.should_show_task_panel(),
+        }
+    }
+
+    /// The process-status line (§9.6) at its wide string-table form.
+    pub fn status_line(&self) -> String {
+        compose_status(&self.status_leads(), &self.task_segment())
+    }
+
+    /// The process row squeezed for `width` columns (status-strip text +
+    /// whether a Tip may still ride behind it).
+    pub fn status_fit(&self, width: usize) -> StatusFit {
+        fit_status(&self.status_leads(), &self.task_segment(), width)
     }
 }
 

@@ -1610,28 +1610,43 @@ fn sub_agent_text_is_labeled_and_lifecycle_tracked() {
         app.sub_agents.get("root/a").map(|s| &s.status),
         Some(&SubAgentStatus::Running)
     );
+    // Child RunFinished is flush-only (ENG-F1 shape B): the row's terminal
+    // fact arrives from the watcher wire / registry lifecycle.
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
+    assert_eq!(
+        app.sub_agents.get("root/a").map(|s| &s.status),
+        Some(&SubAgentStatus::Running)
+    );
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert_eq!(
         app.sub_agents.get("root/a").map(|s| &s.status),
         Some(&SubAgentStatus::Done)
     );
-    // Main transcript should only have the "started" marker
+    // Main transcript: the started marker plus the permanent done ledger line.
     let texts: Vec<&str> = app
         .transcript
         .output
         .iter()
         .map(|l| l.text.as_str())
         .collect();
-    assert_eq!(texts, vec!["* [root/a] started",]);
+    assert_eq!(texts.len(), 2, "started + ledger marker: {texts:?}");
+    assert_eq!(texts[0], "* [root/a] started");
+    assert!(
+        texts[1].starts_with("* [root/a] done ("),
+        "permanent ledger marker missing: {texts:?}"
+    );
     // Check sub-agent transcript
     let sub_texts: Vec<&str> = app
         .sub_agent_transcripts
         .get("root/a")
         .map(|t| t.iter().map(|l| l.text.as_str()).collect())
         .unwrap_or_default();
-    // Sub-agent transcript should have the text and done marker
+    // Sub-agent transcript should have the text and the same done verdict.
     assert!(sub_texts.iter().any(|t| t.contains("found a thing")));
-    assert!(sub_texts.iter().any(|t| t.contains("+ [root/a] done")));
+    assert!(
+        sub_texts.iter().any(|t| t.starts_with("* [root/a] done (")),
+        "child verdict missing: {sub_texts:?}"
+    );
 }
 
 #[test]
@@ -1666,7 +1681,11 @@ fn sub_agents_cleared_on_root_finish() {
     let mut app = App::new();
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "hi")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
+    // The terminal fact comes from the wire, not the child's RunFinished.
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(!app.sub_agents.is_empty());
+    // Root settle wipes the panel rows unless the user is looking at the
+    // frame (框开 = 冻结回收).
     app.handle_event(TuiEvent::Runtime(run_finished(None)));
     assert!(app.sub_agents.is_empty());
 }
@@ -1681,6 +1700,10 @@ fn sub_agent_run_finished_does_not_end_turn() {
     // ...child streaming and its RunFinished must leave it untouched.
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "hi")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
+    assert!(app.running);
+    assert!(matches!(app.status, AgentStatus::Running { .. }));
+    // Even the child's terminal fact (wire-driven) must not end the root turn.
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(app.running);
     assert!(matches!(app.status, AgentStatus::Running { .. }));
     assert_eq!(
@@ -1723,6 +1746,8 @@ fn child_deltas_bypass_main_stream_tail() {
     assert_eq!(texts, vec!["* [root/a] started"]);
     // Child content is preserved, committed ahead of the done marker.
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
+    // The verdict is written when the terminal fact lands (wire/lifecycle).
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     let sub_texts: Vec<&str> = app
         .sub_agent_transcripts
         .get("root/a")
@@ -1800,6 +1825,8 @@ fn cleanup_completed_agents_drops_child_stream() {
     let mut app = App::new();
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "some prose")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
+    // Terminal fact (wire) flips the row; only terminal rows reap.
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(app.child_streams.contains_key("root/a"));
     // Backdate past the 3s reap delay, then reap from Idle.
     app.status = AgentStatus::Idle;
@@ -3185,6 +3212,8 @@ fn turn_done_without_running_children_shows_done_and_clears_panel() {
     app.begin_activity();
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "hi")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a")))); // child done first
+    // The child's terminal fact comes from the wire, not its RunFinished.
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     app.handle_event(TuiEvent::Runtime(run_finished(None)));
     app.handle_event(TuiEvent::TurnDone);
     assert!(app.last_turn_summary.is_some(), "done summary recorded");
@@ -3205,7 +3234,7 @@ fn finishing_children_updates_waiting_count_to_idle_at_zero() {
     ));
 
     // Watcher Progress events flip panel entries and refresh the count.
-    app.mark_sub_agent_finished("root/a");
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(matches!(
         app.status,
         AgentStatus::Waiting { running: 1, bg: 0 }
@@ -3215,7 +3244,7 @@ fn finishing_children_updates_waiting_count_to_idle_at_zero() {
         Some(&SubAgentStatus::Done)
     );
 
-    app.mark_sub_agent_finished("root/b");
+    app.mark_sub_agent_finished("root/b", SubAgentStatus::Done);
     assert_eq!(app.status, AgentStatus::Idle);
 }
 

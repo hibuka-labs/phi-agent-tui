@@ -95,12 +95,10 @@ pub(crate) enum TurnEnd {
     Command,
 }
 
-/// Live state of a sub-agent shown in the task panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubAgentStatus {
-    Running,
-    Done,
-}
+/// Live state of a sub-agent shown in the task panel — the display
+/// vocabulary lives in [`crate::task_layout`] (glyph table, ledger markers
+/// and counts all speak it); re-exported here for render/tests.
+pub use crate::task_layout::SubAgentStatus;
 
 /// A background shell task tracked in the task panel.
 #[derive(Debug, Clone)]
@@ -195,29 +193,10 @@ pub(crate) fn is_writing_hint(state: &SubAgentState, now: Instant) -> bool {
     now.duration_since(state.last_tool_at) >= CHILD_WRITING_HINT_AFTER
 }
 
-/// Where the keyboard focus is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FocusTarget {
-    /// Focus is on the input box
-    Input,
-    /// Focus is on the task list, with the given index selected
-    TaskList(usize),
-}
-
-/// Task panel UI state.
-#[derive(Debug, Clone)]
-pub struct TaskPanel {
-    /// Current focus position
-    pub focus: FocusTarget,
-}
-
-impl Default for TaskPanel {
-    fn default() -> Self {
-        Self {
-            focus: FocusTarget::Input,
-        }
-    }
-}
+/// Task panel UI state (`TaskPanel`) and its focus vocabulary — defined in
+/// [`crate::task_focus`] (the three-state toggle machine owns them);
+/// re-exported here for render/tests.
+pub use crate::task_focus::{FocusTarget, TaskPanel};
 
 /// How much of a folded tool block is on screen (Ctrl+E cycles these).
 ///
@@ -1008,10 +987,14 @@ impl App {
             self.pending_cancel = false;
             self.status = AgentStatus::Idle;
             self.activity_since = None;
-            self.sub_agents.clear();
-            self.sub_agent_transcripts.clear();
-            self.child_streams.clear();
-            self.thinking_since.clear();
+            // 框开 = 冻结回收 (F8): the user is looking at these rows — the
+            // age-based reaper sweeps them when the frame closes instead.
+            if !self.task_panel.frame_open {
+                self.sub_agents.clear();
+                self.sub_agent_transcripts.clear();
+                self.child_streams.clear();
+                self.thinking_since.clear();
+            }
             false
         }
     }
@@ -1401,6 +1384,10 @@ impl App {
     pub fn begin_user_turn(&mut self, text: &str) {
         self.push_user(text);
         self.transcript.clear_plan();
+        // F9: one turn = begin_user_turn → settle. The failure auto-expand
+        // re-arms, and a manual collapse outranks it for this turn again.
+        self.task_panel.popped_this_turn = false;
+        self.task_panel.user_collapsed_this_turn = false;
         // Follow the conversation: the user just committed to a turn, so the
         // reply must stream into view. If they were scrolled up reading
         // history, this is the moment their reading position ends.
@@ -1476,126 +1463,9 @@ impl App {
         suffix
     }
 
-    /// Status-strip text for tool calls whose arguments are still streaming
-    /// in — the calls themselves only materialize when the turn's stream
-    /// drains, so this is what the user sees during that window (session
-    /// 20261006_9264ba3e: four `spawn_agent` briefs, ~3.2K chars, ~25 s of
-    /// visible nothing). `None` while no draft is pending.
-    fn draft_status_text(&self) -> Option<String> {
-        if self.tool_drafts.is_empty() {
-            return None;
-        }
-        let chars: usize = self.tool_drafts.values().map(|(_, n)| n).sum();
-        if self.tool_drafts.len() == 1 {
-            let (name, _) = self.tool_drafts.values().next().expect("len == 1");
-            let tool = if name.is_empty() {
-                "tool call"
-            } else {
-                name.as_str()
-            };
-            Some(format!("writing {tool} ({chars} chars)..."))
-        } else {
-            Some(format!(
-                "writing {} tool calls ({chars} chars)...",
-                self.tool_drafts.len()
-            ))
-        }
-    }
-
-    /// The process-status line for the current state (§9.6) — the layer above
-    /// the composer (Claude Code style), below the transcript. Wording follows
-    /// the bounded/daemon split: bounded jobs carry a completion promise
-    /// (auto-report when done), daemons are merely counted as running services
-    /// — the two must never share a "waiting for completion" promise.
-    ///
-    /// A finished turn's verdict is not shown here: it is the turn-final
-    /// status line appended to the transcript. At Idle the ambient
-    /// notices show; key hints rotate in the tips, and the upgrade hint
-    /// lives on the bottom status bar's right slot.
-    pub fn status_line(&self) -> String {
-        match &self.status {
-            AgentStatus::Idle => {
-                let base = if let Some(n) = &self.notice {
-                    n.clone()
-                } else {
-                    "Idle".to_string()
-                };
-                let (_, daemons) = self.bg_running_split();
-                if daemons > 0 {
-                    format!("{base} ({daemons} daemon(s))")
-                } else {
-                    base
-                }
-            }
-            AgentStatus::Waiting { running, .. } => {
-                let (bounded, daemons) = self.bg_running_split();
-                let mut line = match (*running, bounded) {
-                    (_, 0) => format!(
-                        "{} waiting for sub-agents ({running} running)...{} auto-continue when results arrive",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    ),
-                    (0, _) => format!(
-                        "{} waiting for background tasks ({bounded} running)...{} auto-report when done",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    ),
-                    (_, _) => format!(
-                        "{} waiting for sub-agents ({running}) + background tasks ({bounded})...{} auto-continue when done",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    ),
-                };
-                if daemons > 0 {
-                    line.push_str(&format!(" (+{daemons} daemon(s))"));
-                }
-                line
-            }
-            AgentStatus::Running { phase } => match phase {
-                Phase::Thinking => {
-                    format!(
-                        "{} thinking...{} (Ctrl+C cancel)",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    )
-                }
-                Phase::Streaming => match self.draft_status_text() {
-                    // While tool-call args are being written there is no
-                    // delta to stream — report the draft instead of a bare
-                    // "streaming...", so the stretch reads as busy, not hung.
-                    Some(draft) => format!(
-                        "{} {draft}{} (Ctrl+C cancel)",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    ),
-                    None => format!(
-                        "{} streaming...{} (Ctrl+C cancel)",
-                        self.spinner_char(),
-                        self.activity_suffix()
-                    ),
-                },
-                Phase::ToolCall { tool } => match &self.live_progress {
-                    Some(p) => {
-                        format!(
-                            "{} 🔧 {tool}: {p}{}",
-                            self.spinner_char(),
-                            self.activity_suffix()
-                        )
-                    }
-                    None => {
-                        format!(
-                            "{} 🔧 {tool}{} (Ctrl+C cancel)",
-                            self.spinner_char(),
-                            self.activity_suffix()
-                        )
-                    }
-                },
-                Phase::AwaitingApproval => {
-                    "!! waiting approval... (y/a/n, Ctrl+C cancel)".to_string()
-                }
-            },
-        }
-    }
+    // `status_line` / `status_fit` / `draft_status_text` live in
+    // `task_panel.rs`: the process row now composes a lead + the task
+    // segment through the task_layout squeeze ladder.
 
     /// The request currently shown by the approval popup (front of the queue).
     pub fn current_approval(&self) -> Option<&ApprovalRequest> {

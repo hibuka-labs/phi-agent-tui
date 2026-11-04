@@ -760,6 +760,8 @@ fn snapshot_shows_sub_agent_strip() {
             events: Vec::new(),
         },
     );
+    // The frame is opt-in (default S0 collapsed) — open it to see the rows.
+    app.task_panel.frame_open = true;
     let text = snapshot_text(&mut app, 80, 24);
     assert!(text.contains("* a"), "running marker missing:\n{text}");
     assert!(text.contains("+ b"), "done marker missing:\n{text}");
@@ -806,6 +808,8 @@ fn task_panel_lists_background_tasks_as_rows() {
         },
     );
     assert!(app.should_show_task_panel(), "sub-agent opens the panel");
+    // Rows live inside the toggle frame — open it for the snapshot.
+    app.task_panel.frame_open = true;
     let text = snapshot_text(&mut app, 100, 40);
     assert!(
         text.contains("Tasks (2)"),
@@ -841,6 +845,7 @@ fn task_panel_lists_background_tasks_as_rows() {
         app.should_show_task_panel(),
         "bg task alone opens the panel (it is a row now)"
     );
+    app.task_panel.frame_open = true;
     let text = snapshot_text(&mut app, 100, 40);
     assert!(
         text.contains("Tasks (1)"),
@@ -2513,35 +2518,12 @@ fn framed_band_elides_rows_to_the_content_width() {
 }
 
 // ── Task panel column accounting ─────────────────────────────────────────────
-// The name / activity / files cells must be laid out in terminal columns. They
+// The name / files / activity cells must be laid out in terminal columns. They
 // used to mix three accountings — `chars().count()`, `format!("{:<w$}")` (chars)
-// and `result.len()` (bytes) — and the bytes one slices mid-char.
-
-#[test]
-fn format_files_truncates_cjk_names_without_panicking() {
-    // A basename over 20 bytes hit `&result[..max_width - 3]`, which is a byte
-    // slice and panics mid-char ("byte index N is not a char boundary; it is
-    // inside <a multi-byte char>"). That panic ran inside `render`, so it took
-    // the whole TUI down.
-    let files = vec!["测试文件名称很长的文件名.rs".to_string()];
-    let out = format_files(&files, 20);
-    assert!(out.ends_with("..."), "expected an elision: {out:?}");
-    assert!(
-        unicode_width::UnicodeWidthStr::width(out.as_str()) <= 20,
-        "output wider than its column: {out:?}"
-    );
-}
-
-#[test]
-fn format_files_lists_up_to_two_basenames() {
-    // Basenames only, joined by ", ", with "..." marking a longer list.
-    let two = format_files(&["src/a.rs".into(), "src/b.rs".into()], 20);
-    assert_eq!(two, "a.rs, b.rs");
-    let three = format_files(&["a.rs".into(), "b.rs".into(), "c.rs".into()], 40);
-    assert_eq!(three, "a.rs, b.rs...");
-    // Short names pass through untouched.
-    assert_eq!(format_files(&[], 20), "");
-}
+// and `result.len()` (bytes) — and the bytes one slices mid-char. The column
+// accounting itself now lives in `task_layout` (elide/pad per display column,
+// CJK width tests in `task_layout_tests`); the render-level rows are covered by
+// the task-panel snapshot tests below.
 
 #[test]
 fn prose_longer_than_width_must_wrap_not_clip() {

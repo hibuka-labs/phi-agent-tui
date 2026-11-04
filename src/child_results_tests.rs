@@ -11,7 +11,7 @@ fn report(path: &str, message: &str) -> ChildReport {
         agent_path: path.to_string(),
         status: "ok".to_string(),
         result: Some(message.to_string()),
-        message: format!("[子 agent {path} 已完成]\n{message}"),
+        message: format!("[sub-agent {path} done]\n{message}"),
     }
 }
 

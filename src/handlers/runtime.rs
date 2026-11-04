@@ -1021,32 +1021,19 @@ impl App {
             RuntimeEvent::RunFinished { agent_id, .. } => {
                 self.flush_pending();
                 // Only the root agent's finish ends the turn; sub-agents report
-                // their own `RunFinished` with a non-empty `agent_id` (marking
-                // that sub-agent done in the transcript + status strip).
+                // their own `RunFinished` with a non-empty `agent_id`.
                 match agent_id.as_deref() {
                     Some(p) if !p.is_empty() => {
-                        // Commit any pending child stream before the done marker.
+                        // Child: flush its stream only. The engine's
+                        // RunFinished carries NO outcome (ENG-F1 形状 B) — the
+                        // row flips and the ledger marker is written when the
+                        // watcher wire / registry fact lands (finalize is the
+                        // single terminal site; events 只落账不判态).
                         let flushed = self.flush_child_stream(p);
                         self.sub_agent_transcripts
                             .entry(p.to_string())
                             .or_default()
                             .extend(flushed);
-                        if let Some(state) = self.sub_agents.get_mut(p) {
-                            state.status = SubAgentStatus::Done;
-                            state.completed_at = Some(std::time::Instant::now());
-                        }
-                        // Route to sub-agent transcript
-                        self.sub_agent_transcripts
-                            .entry(p.to_string())
-                            .or_default()
-                            .push(OutputLine {
-                                spans: None,
-                                original: None,
-                                detail: None,
-                                text: format!("+ [{p}] done"),
-                                kind: LineKind::Done,
-                                tool_state: None,
-                            });
                     }
                     _ => {
                         // Root agent: just flush and settle. The actual
@@ -1072,28 +1059,10 @@ impl App {
                 self.flush_pending();
                 match agent_id.as_deref() {
                     Some(p) if !p.is_empty() => {
-                        // Commit any pending child stream before the done marker.
-                        let flushed = self.flush_child_stream(p);
-                        self.sub_agent_transcripts
-                            .entry(p.to_string())
-                            .or_default()
-                            .extend(flushed);
-                        if let Some(state) = self.sub_agents.get_mut(p) {
-                            state.status = SubAgentStatus::Done;
-                            state.completed_at = Some(std::time::Instant::now());
-                        }
-                        // Route to sub-agent transcript
-                        self.sub_agent_transcripts
-                            .entry(p.to_string())
-                            .or_default()
-                            .push(OutputLine {
-                                spans: None,
-                                original: None,
-                                detail: None,
-                                text: format!("+ [{p}] done"),
-                                kind: LineKind::Done,
-                                tool_state: None,
-                            });
+                        // This event does know its kind: the child run was
+                        // cancelled — finalize it (ledger `CANCELLED`, the
+                        // — bucket; the red ✗ is for real failures only).
+                        self.mark_sub_agent_finished(p, SubAgentStatus::Cancelled);
                     }
                     _ => {
                         self.transcript.push(OutputLine {

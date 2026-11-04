@@ -157,23 +157,23 @@ fn task_panel_focus_navigation() {
 fn task_panel_focus_resets_on_cleanup() {
     let mut app = App::new();
 
-    // Insert agents, one already completed 4 seconds ago
+    // Insert agents, one already completed past the Done review window (3s).
     insert_mock_agent(&mut app, "root/cache", "cache", SubAgentStatus::Running);
     insert_completed_agent(&mut app, "root/auth", "auth", 4);
 
-    // Focus on auth (index 1): the user is inspecting the list, so cleanup
-    // must NOT reap under their eyes.
+    // The user is looking at the open frame, so cleanup must NOT reap under
+    // their eyes (框开 = 冻结回收).
+    app.task_panel.frame_open = true;
     app.task_panel.focus = FocusTarget::TaskList(1);
     assert!(!app.cleanup_completed_agents());
     assert_eq!(app.sub_agents.len(), 2);
 
-    // Back to input: cleanup now removes auth...
-    app.task_panel.focus = FocusTarget::Input;
+    // Collapse the frame: the over-age row goes at once, and the selection
+    // clamps onto the surviving row.
+    app.task_panel.frame_open = false;
     assert!(app.cleanup_completed_agents());
-
-    // ...and focus would reset to the last valid index (still on Input here,
-    // but the list shrank to cache only).
     assert_eq!(app.sub_agents.len(), 1);
+    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
 }
 
 #[test]
@@ -184,14 +184,16 @@ fn task_panel_focus_resets_to_input_when_all_removed() {
     insert_completed_agent(&mut app, "root/auth", "auth", 4);
     insert_completed_agent(&mut app, "root/cache", "cache", 5);
 
-    // Focus on auth (index 0) blocks cleanup
+    // The open frame freezes reaping.
+    app.task_panel.frame_open = true;
     app.task_panel.focus = FocusTarget::TaskList(0);
     assert!(!app.cleanup_completed_agents());
 
-    // Input focus lets it run: all removed
-    app.task_panel.focus = FocusTarget::Input;
+    // Collapse: both rows are over-age and go; focus returns to the input.
+    app.task_panel.frame_open = false;
     assert!(app.cleanup_completed_agents());
     assert!(app.sub_agents.is_empty());
+    assert_eq!(app.task_panel.focus, FocusTarget::Input);
 }
 
 // ── Transcript Routing Tests ─────────────────────────────────────────────────
@@ -220,8 +222,11 @@ fn sub_agent_text_routes_to_transcript() {
     );
 
     // Child deltas bypass the shared stream (whose pending tail is the main
-    // view's live tail) — they commit on the child's lifecycle events.
+    // view's live tail) — they commit on the child's lifecycle events. The
+    // RunFinished arm is flush-only (ENG-F1 shape B): the done verdict comes
+    // with the terminal fact.
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
 
     // Should be in sub_agent_transcripts, ahead of the done marker
     let sub_lines = app.sub_agent_transcripts.get("root/auth").unwrap();
@@ -277,9 +282,10 @@ fn sub_agent_tool_calls_route_to_transcript() {
 fn sub_agent_completion_routes_to_transcript() {
     let mut app = App::new();
 
-    // Simulate complete lifecycle
+    // Simulate complete lifecycle — the terminal fact arrives from the wire.
     app.handle_event(TuiEvent::Runtime(sub_text("root/auth", "work done")));
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
 
     // Check sub-agent state
     let state = app.sub_agents.get("root/auth").unwrap();
@@ -496,8 +502,9 @@ fn full_sub_agent_lifecycle() {
         "120 lines",
     )));
 
-    // 3. Sub-agent finishes
+    // 3. Sub-agent finishes — the terminal fact arrives from the wire.
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
     assert_eq!(
         app.sub_agents.get("root/auth").unwrap().status,
         SubAgentStatus::Done
@@ -563,6 +570,8 @@ fn duplicate_agent_id_merges() {
     )));
     app.handle_event(TuiEvent::Runtime(sub_text("root/auth", "second")));
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
+    // The done verdict is written with the terminal fact (wire).
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
 
     // All in the same transcript, in order
     let lines = app.sub_agent_transcripts.get("root/auth").unwrap();
@@ -609,10 +618,13 @@ fn panel_shows_frozen_time_for_done_agents() {
     state.started_at = Instant::now() - Duration::from_secs(65);
     state.completed_at = Some(Instant::now() - Duration::from_secs(10));
     app.sub_agents.insert("root/auth".to_string(), state);
+    app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
+    // The time column is gone (design mock): a done row freezes its runtime
+    // in the activity cell.
     assert!(
-        snap.contains("│   55s"),
+        snap.contains("done 55s"),
         "done agent's runtime must freeze at completed-started, got:\n{snap}"
     );
 }
@@ -621,6 +633,7 @@ fn panel_shows_frozen_time_for_done_agents() {
 fn panel_activity_column_shows_latest_tool() {
     let mut app = App::new();
     insert_agent_with_event(&mut app, "root/auth", "auth", "read_file", false);
+    app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
     assert!(
@@ -652,19 +665,23 @@ fn panel_columns_align_with_long_names() {
         false,
     );
     insert_agent_with_event(&mut app, "root/pi", "pi", "read_file", false);
+    app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
     // Name column capped at 16 → the long name is ellipsized (13 chars + "...") instead of
     // shoving the later columns out of alignment.
     assert!(snap.contains("analyze-deeps..."), "got:\n{snap}");
-    // Both rows' time column (│) must sit at the same character position.
+    // Both rows' column separators must sit at the same character position.
     let cols: Vec<usize> = snap
         .lines()
         .filter(|l| l.contains("analyze-deeps...") || l.contains(" pi "))
         .filter_map(|l| l.find('│'))
         .collect();
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");
-    assert_eq!(cols[0], cols[1], "time column must align, got:\n{snap}");
+    assert_eq!(
+        cols[0], cols[1],
+        "column separators must align, got:\n{snap}"
+    );
 }
 
 #[test]
@@ -681,13 +698,14 @@ fn panel_columns_align_across_cjk_and_ascii_names() {
         false,
     );
     insert_agent_with_event(&mut app, "root/pi", "pi", "read_file", false);
+    app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
-    // Both rows' `│` (the time column) must sit on the same DISPLAY column.
-    // Comparing char indices would hide the misalignment, so measure the width
-    // of the prefix before `│` instead.
+    // Both rows' `│` (the name/files separator) must sit on the same DISPLAY
+    // column. Comparing char indices would hide the misalignment, so measure
+    // the width of the prefix before `│` instead.
     // `│` #0 is the panel's own left border (which would make every row look
-    // aligned); `│` #1 is the time column separator inside the row.
+    // aligned); `│` #1 is the first column separator inside the row.
     let cols: Vec<usize> = snap
         .lines()
         .filter(|l| l.contains("read_file"))
@@ -699,11 +717,11 @@ fn panel_columns_align_across_cjk_and_ascii_names() {
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");
     assert!(
         cols.iter().all(|&c| c > 1),
-        "measured the border, not the time column: {cols:?}\n{snap}"
+        "measured the border, not the column separator: {cols:?}\n{snap}"
     );
     assert_eq!(
         cols[0], cols[1],
-        "time column must align in display columns, got:\n{snap}"
+        "column separators must align in display columns, got:\n{snap}"
     );
 }
 
@@ -786,6 +804,7 @@ fn snap(path: &str, status: &str) -> std::sync::Arc<RegistrySnapshot> {
             tool_calls: 0,
             task: None,
             pending_results: 0,
+            last_error: None,
         }],
     })
 }
@@ -877,6 +896,7 @@ fn snapshot_keeps_waiting_count_in_sync() {
                     tool_calls: 0,
                     task: None,
                     pending_results: 0,
+                    last_error: None,
                 },
                 AgentSnapshot {
                     path: "root/b".into(),
@@ -886,6 +906,7 @@ fn snapshot_keeps_waiting_count_in_sync() {
                     tool_calls: 0,
                     task: None,
                     pending_results: 0,
+                    last_error: None,
                 },
             ],
         })

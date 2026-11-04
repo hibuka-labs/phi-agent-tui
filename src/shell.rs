@@ -202,6 +202,8 @@ pub struct Keymap {
     pub cycle_result_tier: char,
     /// Ctrl-chord that reopens the product panel (design canvas; default `b`).
     pub canvas_reopen: char,
+    /// Ctrl-chord that toggles the task panel frame (default `t`).
+    pub task_panel_toggle: char,
 }
 
 impl Default for Keymap {
@@ -215,6 +217,7 @@ impl Default for Keymap {
             toggle_thoughts: 'o',
             cycle_result_tier: 'e',
             canvas_reopen: 'b',
+            task_panel_toggle: 't',
         }
     }
 }

@@ -38,6 +38,8 @@ pub mod render;
 pub mod run;
 pub mod session_state;
 pub mod shell;
+pub mod task_focus;
+pub mod task_layout;
 pub mod task_panel;
 #[cfg(unix)]
 pub mod term_guard;

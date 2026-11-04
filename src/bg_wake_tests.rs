@@ -137,7 +137,7 @@ fn wake_holds_while_sub_agents_are_running() {
     );
 
     // Child finishes → the wake is now due.
-    app.mark_sub_agent_finished("root/auth");
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
     assert!(app.take_bg_wake(Instant::now()).is_some());
 }
 
@@ -710,13 +710,13 @@ fn waiting_count_follows_bg_tasks_and_drops_to_idle() {
     // Refresh path: finishing a sub-agent entry refreshes both counts; use a
     // no-op id so only the refresh effect is observed.
     app.background_tasks.get_mut("bg_aaaa1111").unwrap().status = BackgroundTaskStatus::Done;
-    app.mark_sub_agent_finished("__noop_refresh__");
+    app.mark_sub_agent_finished("__noop_refresh__", SubAgentStatus::Done);
     assert!(matches!(
         app.status,
         AgentStatus::Waiting { running: 0, bg: 1 }
     ));
 
     app.background_tasks.get_mut("bg_bbbb2222").unwrap().status = BackgroundTaskStatus::Done;
-    app.mark_sub_agent_finished("__noop_refresh__");
+    app.mark_sub_agent_finished("__noop_refresh__", SubAgentStatus::Done);
     assert_eq!(app.status, AgentStatus::Idle);
 }
