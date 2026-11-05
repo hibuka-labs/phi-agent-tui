@@ -115,84 +115,62 @@ fn insert_completed_agent(app: &mut App, agent_id: &str, name: &str, completed_s
 fn task_panel_focus_navigation() {
     let mut app = App::new();
 
-    // Insert mock agents
-    insert_mock_agent(&mut app, "root/cache", "cache", SubAgentStatus::Running);
-    insert_mock_agent(&mut app, "root/auth", "auth", SubAgentStatus::Running);
-    insert_mock_agent(&mut app, "root/db", "db", SubAgentStatus::Running);
+    // Insert mock agents in a known spawn order (row order is spawn order;
+    // backdate started_at so it cannot tie).
+    for (id, name, secs_ago) in [
+        ("root/auth", "auth", 3),
+        ("root/cache", "cache", 2),
+        ("root/db", "db", 1),
+    ] {
+        insert_mock_agent(&mut app, id, name, SubAgentStatus::Running);
+        app.sub_agents.get_mut(id).unwrap().started_at =
+            Instant::now() - Duration::from_secs(secs_ago);
+    }
 
     // Default focus is Input
     assert_eq!(app.task_panel.focus, FocusTarget::Input);
 
-    // Up from Input moves to last task
-    app.task_panel.focus = FocusTarget::Input;
+    // Up from Input opens the frame and lands on the last row (D10).
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(2));
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/db".to_string())
+    );
 
-    // Up again moves to previous task
+    // Up walks up the spawn-ordered list (selection lands by id — rows
+    // vanish and indices shift, Rev 2026-11-04).
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(1));
-
-    // Up again moves to first task
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/cache".to_string())
+    );
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/auth".to_string())
+    );
 
-    // Up at first task stays at first
+    // Up at the first row stays at the first.
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/auth".to_string())
+    );
 
-    // Down moves to next task
+    // Down walks back down the list.
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(1));
-
-    // Down to last task
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/cache".to_string())
+    );
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(2));
+    assert_eq!(
+        app.task_panel.focus,
+        FocusTarget::TaskList("root/db".to_string())
+    );
 
-    // Down past last task moves to Input
+    // Down past the full-list last row drops to S1 (Input).
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(app.task_panel.focus, FocusTarget::Input);
-}
-
-#[test]
-fn task_panel_focus_resets_on_cleanup() {
-    let mut app = App::new();
-
-    // Insert agents, one already completed past the Done review window (3s).
-    insert_mock_agent(&mut app, "root/cache", "cache", SubAgentStatus::Running);
-    insert_completed_agent(&mut app, "root/auth", "auth", 4);
-
-    // The user is looking at the open frame, so cleanup must NOT reap under
-    // their eyes (框开 = 冻结回收).
-    app.task_panel.frame_open = true;
-    app.task_panel.focus = FocusTarget::TaskList(1);
-    assert!(!app.cleanup_completed_agents());
-    assert_eq!(app.sub_agents.len(), 2);
-
-    // Collapse the frame: the over-age row goes at once, and the selection
-    // clamps onto the surviving row.
-    app.task_panel.frame_open = false;
-    assert!(app.cleanup_completed_agents());
-    assert_eq!(app.sub_agents.len(), 1);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
-}
-
-#[test]
-fn task_panel_focus_resets_to_input_when_all_removed() {
-    let mut app = App::new();
-
-    // Insert only completed agents
-    insert_completed_agent(&mut app, "root/auth", "auth", 4);
-    insert_completed_agent(&mut app, "root/cache", "cache", 5);
-
-    // The open frame freezes reaping.
-    app.task_panel.frame_open = true;
-    app.task_panel.focus = FocusTarget::TaskList(0);
-    assert!(!app.cleanup_completed_agents());
-
-    // Collapse: both rows are over-age and go; focus returns to the input.
-    app.task_panel.frame_open = false;
-    assert!(app.cleanup_completed_agents());
-    assert!(app.sub_agents.is_empty());
     assert_eq!(app.task_panel.focus, FocusTarget::Input);
 }
 
@@ -225,6 +203,10 @@ fn sub_agent_text_routes_to_transcript() {
     // view's live tail) — they commit on the child's lifecycle events. The
     // RunFinished arm is flush-only (ENG-F1 shape B): the done verdict comes
     // with the terminal fact.
+    // Pin the row first: the terminal fact triggers the all-complete sweep (nothing else
+    // is running), and the pinned row (inspection freeze 检视冻结) is what keeps its transcript
+    // readable here.
+    app.task_panel.focus = FocusTarget::TaskList("root/auth".to_string());
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
     app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
 
@@ -283,7 +265,9 @@ fn sub_agent_completion_routes_to_transcript() {
     let mut app = App::new();
 
     // Simulate complete lifecycle — the terminal fact arrives from the wire.
+    // The pin (inspection freeze 检视冻结) keeps the entry from being swept before we read it.
     app.handle_event(TuiEvent::Runtime(sub_text("root/auth", "work done")));
+    app.task_panel.focus = FocusTarget::TaskList("root/auth".to_string());
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
     app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
 
@@ -297,38 +281,32 @@ fn sub_agent_completion_routes_to_transcript() {
     assert!(sub_lines.last().unwrap().text.contains("done"));
 }
 
-// ── Auto-Cleanup Tests ───────────────────────────────────────────────────────
+// ── Death sweeps (Rev 2026-11-04) ─────────────────────────────────────────
 
 #[test]
-fn cleanup_removes_old_completed_agents() {
+fn sweep_removes_terminal_rows_but_spares_running_ones() {
     let mut app = App::new();
 
-    // Insert agents with different completion times
+    // Age is not a condition any more (the old TTL cleanup is retired): the
+    // sweep IS the death — turn end / all-complete take every terminal row the
+    // display set no longer owes, however recently it landed.
     insert_mock_agent(&mut app, "root/running", "running", SubAgentStatus::Running);
-    insert_completed_agent(&mut app, "root/recent", "recent", 1); // 1 second ago
-    insert_completed_agent(&mut app, "root/old", "old", 4); // 4 seconds ago
-    insert_completed_agent(&mut app, "root/older", "older", 10); // 10 seconds ago
+    insert_completed_agent(&mut app, "root/recent", "recent", 1);
+    insert_completed_agent(&mut app, "root/old", "old", 4);
 
-    // Cleanup
-    let removed = app.cleanup_completed_agents();
-    assert!(removed);
+    assert!(app.turn_end_sweep());
 
-    // Running agent should remain
+    // Running rows survive; both terminal rows go regardless of age.
     assert!(app.sub_agents.contains_key("root/running"));
-
-    // Recent (1s) should remain
-    assert!(app.sub_agents.contains_key("root/recent"));
-
-    // Old (4s) and older (10s) should be removed
+    assert!(!app.sub_agents.contains_key("root/recent"));
     assert!(!app.sub_agents.contains_key("root/old"));
-    assert!(!app.sub_agents.contains_key("root/older"));
 }
 
 #[test]
-fn cleanup_removes_corresponding_transcripts() {
+fn sweep_removes_corresponding_transcripts() {
     let mut app = App::new();
 
-    // Insert completed agent with transcript
+    // A swept row takes its per-child buffers with it.
     insert_completed_agent(&mut app, "root/auth", "auth", 4);
     app.sub_agent_transcripts.insert(
         "root/auth".to_string(),
@@ -342,25 +320,21 @@ fn cleanup_removes_corresponding_transcripts() {
         }],
     );
 
-    // Cleanup
-    app.cleanup_completed_agents();
+    app.turn_end_sweep();
 
-    // Transcript should be removed
     assert!(!app.sub_agent_transcripts.contains_key("root/auth"));
 }
 
 #[test]
-fn cleanup_does_nothing_when_no_completed() {
+fn sweep_does_nothing_when_everything_is_running() {
     let mut app = App::new();
 
     // Insert only running agents
     insert_mock_agent(&mut app, "root/a", "a", SubAgentStatus::Running);
     insert_mock_agent(&mut app, "root/b", "b", SubAgentStatus::Running);
 
-    // Cleanup should return false
-    assert!(!app.cleanup_completed_agents());
-
-    // All agents should remain
+    assert!(!app.turn_end_sweep());
+    assert!(!app.auto_sweep());
     assert_eq!(app.sub_agents.len(), 2);
 }
 
@@ -502,26 +476,32 @@ fn full_sub_agent_lifecycle() {
         "120 lines",
     )));
 
-    // 3. Sub-agent finishes — the terminal fact arrives from the wire.
+    // 3. It finishes — the terminal fact arrives from the wire. Nothing else
+    //    is running and nothing is pinned, so hide-on-complete and the all-complete sweep
+    //    sweep land together (Rev 2026-11-04): the row and its buffers go
+    //    at once — no TTL, no review window.
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
     app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
-    assert_eq!(
-        app.sub_agents.get("root/auth").unwrap().status,
-        SubAgentStatus::Done
-    );
 
-    // 4. Panel still visible (agent not yet cleaned up)
-    assert!(app.should_show_task_panel());
-
-    // 5. Simulate time passing (manually set completed_at to 4 seconds ago)
-    app.sub_agents.get_mut("root/auth").unwrap().completed_at =
-        Some(Instant::now() - Duration::from_secs(4));
-
-    // 6. Cleanup removes the agent
-    assert!(app.cleanup_completed_agents());
+    // 4. The face is empty and the store is swept …
     assert!(!app.should_show_task_panel());
     assert!(app.sub_agents.is_empty());
     assert!(app.sub_agent_transcripts.is_empty());
+
+    // 5. … but the ledger line is the permanent record (grep-able after the
+    //    row is swept).
+    assert!(
+        app.transcript
+            .output
+            .iter()
+            .any(|l| l.text.contains("* [root/auth] done (")),
+        "ledger line must outlive the row: {:?}",
+        app.transcript
+            .output
+            .iter()
+            .map(|l| &l.text)
+            .collect::<Vec<_>>()
+    );
 }
 
 // ── Edge Cases ───────────────────────────────────────────────────────────────
@@ -569,6 +549,9 @@ fn duplicate_agent_id_merges() {
         "read_file",
     )));
     app.handle_event(TuiEvent::Runtime(sub_text("root/auth", "second")));
+    // The pin (inspection freeze 检视冻结) keeps the transcript alive past the terminal fact —
+    // the all-complete sweep would otherwise take it before the ordering assertion.
+    app.task_panel.focus = FocusTarget::TaskList("root/auth".to_string());
     app.handle_event(TuiEvent::Runtime(sub_run_finished("root/auth")));
     // The done verdict is written with the terminal fact (wire).
     app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
@@ -581,20 +564,6 @@ fn duplicate_agent_id_merges() {
     assert!(lines[1].text.contains("read_file"));
     assert!(lines[2].text.contains("second"));
     assert!(lines[3].text.contains("done"));
-}
-
-#[test]
-fn cleanup_with_no_completed_at() {
-    let mut app = App::new();
-
-    // Insert agent with Done status but no completed_at (edge case)
-    let mut state = mock_sub_agent("auth", SubAgentStatus::Done);
-    state.completed_at = None;
-    app.sub_agents.insert("root/auth".to_string(), state);
-
-    // Cleanup should not remove it
-    assert!(!app.cleanup_completed_agents());
-    assert!(app.sub_agents.contains_key("root/auth"));
 }
 
 // ── Panel Rendering (activity column + timer freeze, 20260904 UX batch) ─────
@@ -618,6 +587,9 @@ fn panel_shows_frozen_time_for_done_agents() {
     state.started_at = Instant::now() - Duration::from_secs(65);
     state.completed_at = Some(Instant::now() - Duration::from_secs(10));
     app.sub_agents.insert("root/auth".to_string(), state);
+    // Touched → the done row lingers as a dim corpse; an untouched terminal
+    // row hides the moment it lands (hide-on-complete 完成即隐).
+    app.task_panel.touched.insert("root/auth".to_string());
     app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
@@ -729,13 +701,16 @@ fn panel_columns_align_across_cjk_and_ascii_names() {
 // The root turn ends while children still run (the fan-in norm), so between
 // turns child events keep flowing through the persistent bus subscription.
 // They must not clobber the root's Waiting status, and finished children's
-// transcripts must survive until the root is Idle and the user is not reading.
+// transcripts must survive while any sibling still runs — the sweep is
+// state-based (the all-complete sweep fires when nothing is running, no TTL).
 
 #[test]
-fn cleanup_skipped_while_root_waiting() {
+fn the_sweep_never_runs_while_siblings_still_run() {
     let mut app = App::new();
 
-    // A child finished 10s ago but the root is Waiting for its siblings.
+    // A child finished while its sibling is still working: the all-complete sweep is
+    // state-based (nothing running), so the corpse — and its transcript,
+    // the only record of what the sub-agent did — survive the wait.
     insert_completed_agent(&mut app, "root/auth", "auth", 10);
     app.sub_agent_transcripts.insert(
         "root/auth".to_string(),
@@ -748,13 +723,21 @@ fn cleanup_skipped_while_root_waiting() {
             tool_state: None,
         }],
     );
-    app.status = AgentStatus::Waiting { running: 2, bg: 0 };
+    insert_mock_agent(&mut app, "root/db", "db", SubAgentStatus::Running);
 
-    // Cleanup must not reap: the transcript is the only record of what the
-    // sub-agent did, and the turn may resume at any moment.
-    assert!(!app.cleanup_completed_agents());
+    assert!(!app.auto_sweep());
     assert!(app.sub_agents.contains_key("root/auth"));
     assert!(app.sub_agent_transcripts.contains_key("root/auth"));
+
+    // The last sibling lands: now the sweep is due and takes both entries
+    // with their buffers.
+    app.mark_sub_agent_finished("root/db", SubAgentStatus::Done);
+    assert!(
+        !app.sub_agents.contains_key("root/auth"),
+        "all-complete sweep"
+    );
+    assert!(!app.sub_agents.contains_key("root/db"));
+    assert!(!app.sub_agent_transcripts.contains_key("root/auth"));
 }
 
 #[test]
@@ -787,147 +770,6 @@ fn child_streaming_does_not_clobber_waiting_status() {
     // ...but the child's activity still lands in its transcript.
     let sub_lines = app.sub_agent_transcripts.get("root/auth").unwrap();
     assert!(sub_lines.iter().any(|l| l.text.contains("read_file")));
-}
-
-// ── Phase 5: lifecycle snapshot reconciliation ───────────────────────────────
-
-use phi_agent::{AgentSnapshot, RegistrySnapshot};
-
-/// A snapshot with a single agent in the given derived status.
-fn snap(path: &str, status: &str) -> std::sync::Arc<RegistrySnapshot> {
-    std::sync::Arc::new(RegistrySnapshot {
-        agents: vec![AgentSnapshot {
-            path: path.to_string(),
-            status: status.to_string(),
-            running_secs: None,
-            last_activity_secs: None,
-            tool_calls: 0,
-            task: None,
-            pending_results: 0,
-            last_error: None,
-        }],
-    })
-}
-
-#[test]
-fn snapshot_creates_entry_at_spawn_before_first_tool_event() {
-    // Phase 5's whole point: the event-driven path only discovered a child
-    // at its first ActionStarted; the snapshot makes the panel entry
-    // appear the moment the agent registers.
-    let mut app = App::new();
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "running")));
-
-    let state = app.sub_agents.get("root/worker").expect("entry exists");
-    assert_eq!(state.status, SubAgentStatus::Running);
-    assert!(
-        app.transcript
-            .output
-            .iter()
-            .any(|l| l.text.contains("[root/worker] started"))
-    );
-}
-
-#[test]
-fn snapshot_running_to_done_sets_completed_at() {
-    let mut app = App::new();
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "running")));
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "done")));
-
-    let state = app.sub_agents.get("root/worker").unwrap();
-    assert_eq!(state.status, SubAgentStatus::Done);
-    assert!(state.completed_at.is_some());
-}
-
-#[test]
-fn snapshot_done_to_running_reopens_retasked_entry() {
-    let mut app = App::new();
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "running")));
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "done")));
-    // send_message(trigger=true) re-tasks the agent → fact flips back.
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "running")));
-
-    let state = app.sub_agents.get("root/worker").unwrap();
-    assert_eq!(state.status, SubAgentStatus::Running);
-    assert!(
-        state.completed_at.is_none(),
-        "reopened entry must not be reaped"
-    );
-}
-
-#[test]
-fn snapshot_unknown_done_agent_is_not_inserted() {
-    // A freshly registered agent reads `done` until its first send_task —
-    // inserting it would show a phantom done entry.
-    let mut app = App::new();
-    app.handle_event(TuiEvent::Lifecycle(snap("root/fresh", "done")));
-
-    assert!(app.sub_agents.is_empty());
-}
-
-#[test]
-fn snapshot_disappearance_marks_done_but_keeps_entry() {
-    // Unregistration = normal exit after posting, or close — the panel must
-    // keep the review window; the 3s reaper owns removal.
-    let mut app = App::new();
-    app.handle_event(TuiEvent::Lifecycle(snap("root/worker", "running")));
-    app.handle_event(TuiEvent::Lifecycle(std::sync::Arc::new(RegistrySnapshot {
-        agents: vec![],
-    })));
-
-    let state = app.sub_agents.get("root/worker").expect("entry kept");
-    assert_eq!(state.status, SubAgentStatus::Done);
-    assert!(state.completed_at.is_some());
-}
-
-#[test]
-fn snapshot_keeps_waiting_count_in_sync() {
-    // Snapshots are full views of the registry — both agents present until
-    // one is done (a real snapshot would keep showing it until
-    // unregister; here "done" rows are simply dropped from the view to
-    // also exercise the disappearance backstop).
-    let two = |a: &str, b: &str| {
-        std::sync::Arc::new(RegistrySnapshot {
-            agents: vec![
-                AgentSnapshot {
-                    path: "root/a".into(),
-                    status: a.into(),
-                    running_secs: None,
-                    last_activity_secs: None,
-                    tool_calls: 0,
-                    task: None,
-                    pending_results: 0,
-                    last_error: None,
-                },
-                AgentSnapshot {
-                    path: "root/b".into(),
-                    status: b.into(),
-                    running_secs: None,
-                    last_activity_secs: None,
-                    tool_calls: 0,
-                    task: None,
-                    pending_results: 0,
-                    last_error: None,
-                },
-            ],
-        })
-    };
-
-    let mut app = App::new();
-    app.status = AgentStatus::Waiting { running: 2, bg: 0 };
-    app.handle_event(TuiEvent::Lifecycle(two("running", "running")));
-    assert!(matches!(
-        app.status,
-        AgentStatus::Waiting { running: 2, bg: 0 }
-    ));
-
-    app.handle_event(TuiEvent::Lifecycle(two("done", "running")));
-    assert!(matches!(
-        app.status,
-        AgentStatus::Waiting { running: 1, bg: 0 }
-    ));
-
-    app.handle_event(TuiEvent::Lifecycle(two("done", "done")));
-    assert!(matches!(app.status, AgentStatus::Idle));
 }
 
 // ── Focused-child live tail (10.1 backlog batch) ─────────────────────────────
@@ -1063,347 +905,4 @@ fn tool_events_refresh_last_tool_at() {
         stamped.elapsed() < Duration::from_secs(5),
         "finish must re-stamp"
     );
-}
-
-// ── Background Task Reap Tests ─────────────────────────────────────────────
-
-use phi_kernel_tools::background_shell::{BackgroundTaskRegistry, BackgroundTaskStatus};
-
-#[test]
-fn background_task_reap_after_3_seconds() {
-    // Test that background tasks are reaped 3 seconds after completion,
-    // regardless of whether they're still in the registry.
-
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    // Register a background task
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("echo test", None, cancel_token, None, 120_000)
-        .unwrap();
-
-    // First reconcile: task should appear in app.background_tasks
-    let changed = app.reconcile_background_tasks();
-    assert!(changed, "first reconcile should detect new task");
-    assert_eq!(app.background_tasks.len(), 1);
-    assert_eq!(
-        app.background_tasks[&task_id].status,
-        BackgroundTaskStatus::Running
-    );
-
-    // Finish the task in the registry
-    registry.update_status(&task_id, BackgroundTaskStatus::Done);
-
-    // Reconcile: task should be updated to Done, finished_at set to now
-    let changed = app.reconcile_background_tasks();
-    assert!(changed, "reconcile should detect status change");
-    assert_eq!(app.background_tasks.len(), 1);
-    assert_eq!(
-        app.background_tasks[&task_id].status,
-        BackgroundTaskStatus::Done
-    );
-
-    // Task should NOT be reaped yet (done < 3s ago)
-    let changed = app.reconcile_background_tasks();
-    assert!(!changed, "reconcile should not change anything (done < 3s)");
-    assert_eq!(
-        app.background_tasks.len(),
-        1,
-        "task should NOT be reaped yet"
-    );
-
-    // Simulate time passing (backdate finished_at by 4 seconds)
-    app.background_tasks.get_mut(&task_id).unwrap().finished_at =
-        Some(Instant::now() - Duration::from_secs(4));
-
-    // An unreported outcome still owes the agent a wake (issue #29) — the
-    // display reap must not eat it yet (see `may_reap`).
-    let changed = app.reconcile_background_tasks();
-    assert!(!changed, "unreported outcome is kept for the wake");
-    assert_eq!(
-        app.background_tasks.len(),
-        1,
-        "unreported task must not be reaped"
-    );
-
-    // Once the wake has taken it, the 3s window applies again.
-    app.background_tasks.get_mut(&task_id).unwrap().reported = true;
-    let changed = app.reconcile_background_tasks();
-    assert!(
-        changed,
-        "reconcile should reap the reported task (done > 3s)"
-    );
-    assert_eq!(app.background_tasks.len(), 0, "task should be reaped");
-}
-
-#[test]
-fn background_task_opens_the_task_panel_as_a_row() {
-    // Panel policy (2026-10-29): background shell tasks are switchable rows —
-    // selecting one shows its live output tail (the "can't see what the
-    // background work is doing" gap). The map still tracks tasks (waiting
-    // counts, wake dedup, ctrl+c cancel), and the 3s reap still cleans up.
-
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    // Initially: no task panel
-    assert!(!app.should_show_task_panel(), "no panel when no tasks");
-
-    // Register a background task
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("sleep 5", None, cancel_token, None, 120_000)
-        .unwrap();
-
-    // Reconcile: the task opens the panel as a background row.
-    app.reconcile_background_tasks();
-    assert_eq!(app.background_tasks.len(), 1);
-    assert!(
-        app.should_show_task_panel(),
-        "bg task opens the panel (it is a row now)"
-    );
-    assert_eq!(
-        app.task_rows(),
-        vec![crate::task_panel::TaskRow::Background(task_id.clone())],
-        "the row is the background task"
-    );
-
-    // Finish the task: the row stays through its review window.
-    registry.update_status(&task_id, BackgroundTaskStatus::Done);
-    app.reconcile_background_tasks();
-    assert!(
-        app.should_show_task_panel(),
-        "done bg task keeps its row until the reap"
-    );
-
-    // The reap still sweeps the map 3s after completion — once the wake has
-    // taken the outcome (`reported`, issue #29: `may_reap` keeps unreported
-    // outcomes for the wake).
-    {
-        let task = app.background_tasks.get_mut(&task_id).unwrap();
-        task.reported = true;
-        task.finished_at = Some(Instant::now() - Duration::from_secs(4));
-    }
-    app.reconcile_background_tasks();
-    assert_eq!(app.background_tasks.len(), 0, "reap still works");
-    assert!(
-        !app.should_show_task_panel(),
-        "panel closes with the last row"
-    );
-}
-
-#[test]
-fn task_rows_put_sub_agents_before_background_tasks() {
-    let mut app = App::new();
-    app.track_agent(Some("root/alpha"));
-    app.track_agent(Some("root/beta"));
-    // Background rows come from the map directly (registry plumbing is
-    // covered by the reconcile tests).
-    app.background_tasks.insert(
-        "bg1".to_string(),
-        BackgroundTaskEntry {
-            id: "bg1".to_string(),
-            command: "cargo test".to_string(),
-            timeout_ms: 0,
-            status: BackgroundTaskStatus::Running,
-            started_at: Instant::now(),
-            finished_at: None,
-            reported: false,
-            output_tail: String::new(),
-            consumed: false,
-        },
-    );
-
-    assert_eq!(
-        app.task_rows(),
-        vec![
-            crate::task_panel::TaskRow::SubAgent("root/alpha".to_string()),
-            crate::task_panel::TaskRow::SubAgent("root/beta".to_string()),
-            crate::task_panel::TaskRow::Background("bg1".to_string()),
-        ]
-    );
-    assert_eq!(app.task_row_count(), 3);
-}
-
-#[test]
-fn background_tail_refreshes_while_running() {
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("sleep 5", None, cancel_token, None, 120_000)
-        .unwrap();
-    app.reconcile_background_tasks();
-    assert_eq!(app.background_tasks[&task_id].output_tail, "");
-
-    // Output arriving while the task runs lands in the tail per tick — the
-    // row's inspection view is live, not terminal-only.
-    registry.append_output(&task_id, Some("line one"), None);
-    assert!(app.reconcile_background_tasks(), "tail moved the frame");
-    assert!(
-        app.background_tasks[&task_id]
-            .output_tail
-            .contains("line one"),
-        "tail: {:?}",
-        app.background_tasks[&task_id].output_tail
-    );
-
-    // Quiet tick: nothing changed, nothing dirties the frame.
-    assert!(
-        !app.reconcile_background_tasks(),
-        "unchanged tail must not dirty every tick"
-    );
-
-    registry.append_output(&task_id, Some("line two"), None);
-    assert!(app.reconcile_background_tasks());
-    let tail = &app.background_tasks[&task_id].output_tail;
-    assert!(
-        tail.contains("line one") && tail.contains("line two"),
-        "{tail:?}"
-    );
-}
-
-#[test]
-fn reaped_task_is_not_readded_by_later_reconciles() {
-    // Regression: reap → re-add → reap loop. `snapshot_all` keeps finished
-    // tasks until the registry's own 5-min GC TTL expires, so after the panel
-    // reaps a task the next tick's snapshot still reports it. Reconcile must
-    // not resurrect it: the upsert skips terminal snapshots whose finished_at
-    // is already past the 3s reap window.
-    //
-    // Uses a real sleep (not app-side backdating): the guard keys off the
-    // registry's own finished_at, which in production equals the panel's —
-    // both are taken at the same finish instant.
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("sleep 30", None, cancel_token, None, 120_000)
-        .unwrap();
-
-    // Task appears, then finishes; panel reflects Done with the registry's
-    // finished_at.
-    assert!(
-        app.reconcile_background_tasks(),
-        "first reconcile detects the new task"
-    );
-    registry.update_status(&task_id, BackgroundTaskStatus::Done);
-    assert!(
-        app.reconcile_background_tasks(),
-        "reconcile detects the status change"
-    );
-    assert_eq!(
-        app.background_tasks[&task_id].status,
-        BackgroundTaskStatus::Done
-    );
-
-    // The wake takes the outcome before the display window closes — the reap
-    // below is only reachable for reported entries (`may_reap`, issue #29).
-    app.background_tasks.get_mut(&task_id).unwrap().reported = true;
-
-    // Past the 3s display window: this reconcile reaps the task …
-    std::thread::sleep(Duration::from_millis(3100));
-    assert!(
-        app.reconcile_background_tasks(),
-        "task past the window should be reaped"
-    );
-    assert!(app.background_tasks.is_empty(), "task should be reaped");
-
-    // … and every subsequent tick stays quiescent. The registry still holds
-    // the task (its GC TTL is 5 min), but the panel must not re-add it.
-    for tick in 0..3 {
-        assert!(
-            !app.reconcile_background_tasks(),
-            "reconcile {tick} must stay quiescent after reap"
-        );
-        assert!(
-            app.background_tasks.is_empty(),
-            "reaped task must not be re-added"
-        );
-    }
-    assert!(
-        !app.should_show_task_panel(),
-        "panel stays hidden after reap"
-    );
-}
-
-#[test]
-fn stale_finished_snapshot_never_seen_is_not_inserted() {
-    // A terminal task that aged past the 3s display window before any
-    // reconcile ran (e.g. the UI thread was blocked) is past its window:
-    // inserting it would only get it re-reaped on the same pass.
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("echo late", None, cancel_token, None, 120_000)
-        .unwrap();
-    registry.update_status(&task_id, BackgroundTaskStatus::Done);
-    std::thread::sleep(Duration::from_millis(3100));
-
-    assert!(
-        !app.reconcile_background_tasks(),
-        "stale finished task must not be inserted"
-    );
-    assert!(app.background_tasks.is_empty());
-    assert!(!app.should_show_task_panel());
-}
-
-#[test]
-fn unreported_outcome_survives_reconcile_until_the_wake_reports_it() {
-    // Issue #29, the "reap races ahead" half: the 3s display reap used to eat
-    // an unreported outcome — in the same reconcile pass that flipped the
-    // batch to Idle (`refresh_waiting_count` in the upsert loop), a sibling
-    // finished ≥3s earlier was deleted by the reap below, and the upsert
-    // guard made the loss permanent: the wake never listed it. The reap/stale
-    // sweeps now only drop entries that no longer owe a report (`may_reap`).
-    let registry = BackgroundTaskRegistry::new(4);
-    let mut app = App::new();
-    app.set_background_registry(registry.clone());
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let task_id = registry
-        .register("echo quiet", None, cancel_token, None, 120_000)
-        .unwrap();
-    registry.update_status(&task_id, BackgroundTaskStatus::Done);
-
-    // Observed once (finished_at taken from the snapshot), then aged past
-    // the display window — root idle, so the reap is armed.
-    assert!(
-        app.reconcile_background_tasks(),
-        "first reconcile observes the task"
-    );
-    app.background_tasks.get_mut(&task_id).unwrap().finished_at =
-        Some(Instant::now() - Duration::from_secs(4));
-    app.status = AgentStatus::Idle;
-
-    app.reconcile_background_tasks();
-    assert!(
-        app.background_tasks.contains_key(&task_id),
-        "unreported outcome must survive the reap"
-    );
-
-    // The debt is paid by the report, not by the clock: the wake still lists
-    // it even though it is past the display window (decision clock moved past
-    // the aggregation quiet window — the 4s age above is for the reap).
-    let (_, input) = app
-        .take_bg_wake(Instant::now() + crate::bg_wake::BG_WAKE_QUIET)
-        .expect("wake must still report it");
-    assert!(
-        input.contains(&task_id),
-        "wake lists the surviving task: {input}"
-    );
-
-    // Reported → the next reconcile reaps it as usual.
-    app.reconcile_background_tasks();
-    assert!(app.background_tasks.is_empty(), "reported task is reaped");
 }

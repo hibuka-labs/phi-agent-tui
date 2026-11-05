@@ -642,12 +642,12 @@ fn status_bar_shows_the_canvas_state_words() {
     // mode block keeping its columns beside them.
     let mut app = App::new();
     app.panel_status = Some(crate::shell::StatusFace {
-        text: "canvas ● localhost:4242 · 3 个选项待选".into(),
+        text: "canvas ● localhost:4242 · 3 options to pick".into(),
         alert: false,
     });
     let text = snapshot_text(&mut app, 100, 12);
     assert!(
-        text.contains("canvas ● localhost:4242 · 3 个选项待选"),
+        text.contains("canvas ● localhost:4242 · 3 options to pick"),
         "canvas face missing from the status bar:\n{text}"
     );
     assert!(
@@ -669,13 +669,13 @@ fn status_bar_crash_face_is_red_and_bold() {
     // Row 16: the disconnected face is the one that shouts.
     let mut app = App::new();
     app.panel_status = Some(crate::shell::StatusFace {
-        text: "canvas ● 已断开 (ctrl+b 重开)".into(),
+        text: "canvas ● disconnected (ctrl+b reopen)".into(),
         alert: true,
     });
     let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     let buf = terminal.backend().buffer().clone();
-    let style = cell_style_for(&buf, 100, "canvas ● 已断开").expect("crash face rendered");
+    let style = cell_style_for(&buf, 100, "canvas ● disconnected").expect("crash face rendered");
     assert_eq!(style.fg, Some(Color::Red));
     assert!(style.add_modifier.contains(Modifier::BOLD));
 }
@@ -761,6 +761,9 @@ fn snapshot_shows_sub_agent_strip() {
         },
     );
     // The frame is opt-in (default S0 collapsed) — open it to see the rows.
+    // Row b is touched: an untouched done row hides the moment it lands
+    // (hide-on-complete 完成即隐), a touched one lingers as a dim corpse until a sweep.
+    app.task_panel.touched.insert("root/b".to_string());
     app.task_panel.frame_open = true;
     let text = snapshot_text(&mut app, 80, 24);
     assert!(text.contains("* a"), "running marker missing:\n{text}");
@@ -871,7 +874,7 @@ fn focused_background_row_shows_the_live_tail() {
         },
     );
     app.push_system("root transcript text");
-    app.task_panel.focus = FocusTarget::TaskList(0);
+    app.task_panel.focus = FocusTarget::TaskList("bg_aaaa1111".to_string());
     let text = snapshot_text(&mut app, 100, 40);
     assert!(
         text.contains("hello from the build"),
@@ -1537,7 +1540,7 @@ fn thinking_panel_follows_focused_child() {
         agent_id: Some("root/searcher".to_string()),
         trace_id: None,
     }));
-    app.task_panel.focus = FocusTarget::TaskList(0);
+    app.task_panel.focus = FocusTarget::TaskList("root/searcher".to_string());
     let text = snapshot_text(&mut app, 80, 24);
     assert!(
         text.contains("thinking - root/searcher"),
@@ -1651,7 +1654,7 @@ fn thinking_panel_hidden_when_focused_child_has_no_thought() {
         agent_id: None,
         trace_id: None,
     }));
-    app.task_panel.focus = FocusTarget::TaskList(0);
+    app.task_panel.focus = FocusTarget::TaskList("root/searcher".to_string());
     let text = snapshot_text(&mut app, 80, 24);
     assert!(
         !text.contains("thinking -"),
@@ -2032,7 +2035,7 @@ fn loose_mode_child_thought_carries_agent_prefix() {
         agent_id: Some("root/searcher".to_string()),
         trace_id: None,
     }));
-    app.task_panel.focus = FocusTarget::TaskList(0);
+    app.task_panel.focus = FocusTarget::TaskList("root/searcher".to_string());
     app.handle_key(KeyCode::Char('o'), KeyModifiers::CONTROL); // loose
     let text = snapshot_text(&mut app, 80, 24);
     assert!(
@@ -2088,7 +2091,7 @@ fn loose_commit_keeps_agent_prefix_after_flush() {
             events: Vec::new(),
         },
     );
-    app.task_panel.focus = FocusTarget::TaskList(0);
+    app.task_panel.focus = FocusTarget::TaskList("root/searcher".to_string());
     app.handle_event(TuiEvent::Runtime(RuntimeEvent::ThoughtDelta {
         session_id: SessionId::new(1),
         text: "search ".repeat(50),

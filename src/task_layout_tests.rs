@@ -1,6 +1,6 @@
 //! Contract tests for the task panel's pure layout/wording layer: the glyph
-//! table, the FAILED conditional format (绝不编数字), the ledger marker
-//! round-trip, and the squeeze ladder (提示最后消失).
+//! table, the FAILED conditional format (never invent a number 绝不编数字), the ledger marker
+//! round-trip, and the squeeze ladder (the hint disappears last 提示最后消失).
 
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ fn timeout_summary_is_only_the_producer_prefix() {
     assert!(!is_timeout_summary(""));
 }
 
-// ── exit-code extraction (绝不编数字) ────────────────────────────────────
+// ── exit-code extraction (never invent a number) ──────────────────────────
 
 #[test]
 fn exit_code_all_literal_forms() {
@@ -155,10 +155,12 @@ fn format_time_panel_form() {
 }
 
 #[test]
-fn ledger_round_trip_covers_every_terminal() {
+fn ledger_lines_cover_every_terminal() {
+    let started = ledger_line("root/a", &SubAgentStatus::Running, Duration::from_secs(3));
+    assert_eq!(started, "* [root/a] started");
+
     let done = ledger_line("root/a", &SubAgentStatus::Done, Duration::from_secs(133));
     assert_eq!(done, "* [root/a] done (2m13s)");
-    assert_eq!(parse_ledger_marker(&done), Some(LedgerMark::Done));
 
     let failed = ledger_line(
         "root/a",
@@ -168,7 +170,6 @@ fn ledger_round_trip_covers_every_terminal() {
         Duration::from_secs(1),
     );
     assert_eq!(failed, "* [root/a] FAILED (exit 2)");
-    assert_eq!(parse_ledger_marker(&failed), Some(LedgerMark::Failed));
 
     let bare = ledger_line(
         "root/a",
@@ -178,80 +179,9 @@ fn ledger_round_trip_covers_every_terminal() {
         Duration::from_secs(1),
     );
     assert_eq!(bare, "* [root/a] FAILED");
-    assert_eq!(parse_ledger_marker(&bare), Some(LedgerMark::Failed));
 
     let cancelled = ledger_line("root/a", &SubAgentStatus::Cancelled, Duration::from_secs(1));
     assert_eq!(cancelled, "* [root/a] CANCELLED");
-    assert_eq!(parse_ledger_marker(&cancelled), Some(LedgerMark::Cancelled));
-}
-
-#[test]
-fn ledger_started_line_and_noise_are_not_markers() {
-    assert_eq!(parse_ledger_marker("* [root/a] started"), None);
-    assert_eq!(parse_ledger_marker("* [root/a]"), None);
-    assert_eq!(parse_ledger_marker("done"), None);
-    assert_eq!(parse_ledger_marker("* [root/a] doneish"), None);
-    assert_eq!(parse_ledger_marker(""), None);
-}
-
-// ── counts, hint, segment ────────────────────────────────────────────────
-
-#[test]
-fn counts_record_buckets_and_never_shrink() {
-    let mut c = TaskCounts::default();
-    c.record(&SubAgentStatus::Running); // not a terminal — no bucket
-    assert_eq!(c, TaskCounts::default());
-    c.record(&SubAgentStatus::Done);
-    c.record(&SubAgentStatus::Failed {
-        summary: "task timed out after 1s".into(),
-    }); // timeouts are ✗
-    c.record(&SubAgentStatus::Failed {
-        summary: "boom".into(),
-    });
-    c.record(&SubAgentStatus::Cancelled);
-    assert_eq!(
-        c,
-        TaskCounts {
-            done: 1,
-            failed: 2,
-            cancelled: 1
-        }
-    );
-    assert_eq!(c.total(), 4);
-}
-
-#[test]
-fn counts_blocks_match_the_string_table() {
-    let c = TaskCounts {
-        done: 18,
-        failed: 2,
-        cancelled: 1,
-    };
-    assert_eq!(
-        c.full_block(2),
-        " · 23 total · 2 running · 18 done · 2 failed · 1 cancelled"
-    );
-    assert_eq!(c.compact_block(2), " · 23t 2r 18d 2f 1c");
-
-    // The cancelled bucket rides only when nonzero (D9).
-    let clean = TaskCounts {
-        done: 3,
-        failed: 0,
-        cancelled: 0,
-    };
-    assert_eq!(
-        clean.full_block(0),
-        " · 3 total · 0 running · 3 done · 0 failed"
-    );
-    assert_eq!(clean.compact_block(0), " · 3t 0r 3d 0f");
-}
-
-#[test]
-fn hint_block_two_states_and_short() {
-    assert_eq!(hint_block(false, false), " · Ctrl+T tasks");
-    assert_eq!(hint_block(true, false), " · Ctrl+T close");
-    assert_eq!(hint_block(false, true), " · ^T tasks");
-    assert_eq!(hint_block(true, true), " · ^T close");
 }
 
 #[test]
@@ -282,160 +212,70 @@ fn lead_piece_trims() {
     assert_eq!(phase.min(), "executing (Ctrl+C cancel)");
 }
 
-#[test]
-fn compose_status_is_the_string_table_wording() {
-    let lead = LeadPieces {
-        head: "⠋ waiting for sub-agents (2 running)...".into(),
-        activity: " - 12s".into(),
-        tail: " auto-continue when results arrive".into(),
-        tail_is_reassurance: true,
-    };
-    let seg = TaskSegment {
-        counts: TaskCounts {
-            done: 3,
-            failed: 1,
-            cancelled: 0,
-        },
-        running: 2,
-        frame_open: false,
-        show: true,
-    };
-    assert_eq!(
-        compose_status(&lead, &seg),
-        "⠋ waiting for sub-agents (2 running)... - 12s auto-continue when results arrive \
-         · 6 total · 2 running · 3 done · 1 failed · Ctrl+T tasks"
-    );
+// ── process-row squeeze ladder (the hint disappears last) ──────────────────
 
-    let open = TaskSegment {
-        frame_open: true,
-        ..seg.clone()
-    };
-    assert!(compose_status(&lead, &open).ends_with("· Ctrl+T close"));
-
-    // No task history → the process row stays untouched.
-    let hidden = TaskSegment {
-        show: false,
-        ..seg.clone()
-    };
-    assert_eq!(compose_status(&lead, &hidden), lead.full());
-}
-
-// ── squeeze ladder (提示最后消失) ────────────────────────────────────────
-
-fn ladder_fixture() -> (LeadPieces, TaskSegment, [String; 5]) {
-    let lead = LeadPieces {
+fn lead_fixture() -> LeadPieces {
+    LeadPieces {
         head: "⠋ waiting for sub-agents (3 running)...".into(),
         activity: " - 42s - 15.0k tok".into(),
         tail: " auto-continue when results arrive".into(),
         tail_is_reassurance: true,
-    };
-    let seg = TaskSegment {
-        counts: TaskCounts {
-            done: 18,
-            failed: 2,
-            cancelled: 1,
-        },
-        running: 3,
-        frame_open: false,
-        show: true,
-    };
-    let counts_full = seg.counts.full_block(seg.running);
-    let counts_compact = seg.counts.compact_block(seg.running);
-    let hint = hint_block(false, false);
-    let hint_short = hint_block(false, true);
-    // Ladder rungs, widest first: wide / ① compact / ③a no-activity /
-    // ③b min + full hint / ④ min + short hint / (hint dead).
-    let rungs = [
-        format!("{}{}{}", lead.full(), counts_full, hint),
-        format!("{}{}{}", lead.full(), counts_compact, hint),
-        format!("{}{}{}", lead.no_activity(), counts_compact, hint),
-        format!("{}{}{}", lead.min(), counts_compact, hint_short),
-        format!("{}{}{}", lead.min(), counts_compact, ""),
-    ];
-    (lead, seg, rungs)
+    }
 }
 
 #[test]
-fn squeeze_ladder_degrades_in_design_order() {
-    let (lead, seg, [wide, compact, no_act, short_hint, no_hint]) = ladder_fixture();
-    let min_full_hint = format!(
-        "{}{}{}",
-        lead.min(),
-        seg.counts.compact_block(seg.running),
-        hint_block(false, false)
-    );
-    assert!(w(&wide) > w(&compact), "wide must lose to ①");
-    assert!(w(&compact) > w(&no_act), "① must lose to ③a");
-    assert!(w(&no_act) > w(&min_full_hint), "③a must lose to ③b");
-    assert!(w(&min_full_hint) > w(&short_hint), "③b must lose to ④");
-    assert!(w(&short_hint) > w(&no_hint), "④ must lose to the dead hint");
-
+fn fit_lead_drops_the_tip_before_any_text() {
+    let lead = lead_fixture();
+    let wide = lead.full();
     // Stage 0: everything wide, Tip rides.
-    let fit = fit_status(&lead, &seg, w(&wide) + TIP_GAP + TIP_MIN_COLS);
+    let fit = fit_lead(&lead, w(&wide) + TIP_GAP + TIP_MIN_COLS);
     assert_eq!(fit.text, wide);
     assert!(fit.tip_allowed);
 
-    // One column less and ① keeps the Tip.
-    let fit = fit_status(&lead, &seg, w(&wide) + TIP_GAP + TIP_MIN_COLS - 1);
-    assert_eq!(fit.text, compact);
-    assert!(fit.tip_allowed);
-
-    // ②: the Tip drops before any text degrades.
-    let fit = fit_status(&lead, &seg, w(&compact) + TIP_GAP + TIP_MIN_COLS - 1);
-    assert_eq!(fit.text, compact);
-    assert!(!fit.tip_allowed);
-
-    // ③a: activity suffix gone.
-    let fit = fit_status(&lead, &seg, w(&compact) - 1);
-    assert_eq!(fit.text, no_act);
-    assert!(!fit.tip_allowed);
-
-    // ③b: reassurance tail gone, hint still full.
-    let fit = fit_status(&lead, &seg, w(&min_full_hint));
-    assert_eq!(fit.text, min_full_hint);
-    assert!(!fit.tip_allowed);
-
-    // ④: hint shrinks to ^T.
-    let fit = fit_status(&lead, &seg, w(&short_hint));
-    assert_eq!(fit.text, short_hint);
-    assert!(fit.text.contains("^T tasks"));
-
-    // The hint dies last: one column less and only the hint is gone.
-    let fit = fit_status(&lead, &seg, w(&short_hint) - 1);
-    assert_eq!(fit.text, no_hint);
-    assert!(
-        !fit.text.contains("^T"),
-        "hint is the last sacrifice: {}",
-        fit.text
-    );
-    assert!(!fit.text.contains("Ctrl+T"));
-
-    // Beyond the ladder: hard-cut from the tail (weak tenants sit at the tail).
-    let fit = fit_status(&lead, &seg, 4);
-    assert_eq!(fit.text, elide(&no_hint, 4, Elide::Head));
+    // One column less and the Tip drops before any text degrades.
+    let fit = fit_lead(&lead, w(&wide) + TIP_GAP + TIP_MIN_COLS - 1);
+    assert_eq!(fit.text, wide);
     assert!(!fit.tip_allowed);
 }
 
 #[test]
-fn squeeze_ladder_fits_at_every_returned_width() {
-    let (lead, seg, _) = ladder_fixture();
-    for width in 1..=w(&lead.full()) + seg.counts.full_block(seg.running).len() + 20 {
-        let fit = fit_status(&lead, &seg, width);
+fn fit_lead_degrades_in_design_order() {
+    let lead = lead_fixture();
+    // ① activity suffix gone.
+    let fit = fit_lead(&lead, w(&lead.no_activity()));
+    assert_eq!(fit.text, lead.no_activity());
+    assert!(!fit.tip_allowed);
+
+    // ② reassurance tail gone (waiting leads only — phase leads keep theirs).
+    let fit = fit_lead(&lead, w(&lead.min()));
+    assert_eq!(fit.text, lead.min());
+
+    let phase = LeadPieces {
+        head: "executing".into(),
+        activity: " - 7s".into(),
+        tail: " (Ctrl+C cancel)".into(),
+        tail_is_reassurance: false,
+    };
+    let fit = fit_lead(&phase, w(&phase.min()));
+    assert_eq!(fit.text, "executing (Ctrl+C cancel)");
+
+    // Beyond the ladder: hard-cut from the head's tail (weak tenants at the tail).
+    let fit = fit_lead(&lead, 4);
+    assert_eq!(fit.text, elide(&lead.min(), 4, Elide::Head));
+    assert!(!fit.tip_allowed);
+}
+
+#[test]
+fn fit_lead_fits_at_every_returned_width() {
+    let lead = lead_fixture();
+    for width in 1..=w(&lead.full()) + 20 {
+        let fit = fit_lead(&lead, width);
         assert!(
             w(&fit.text) <= width,
             "overflow at width {width}: {:?}",
             fit.text
         );
     }
-}
-
-#[test]
-fn segment_without_history_is_never_mounted() {
-    let (lead, _, _) = ladder_fixture();
-    let seg = TaskSegment::default(); // show = false
-    let fit = fit_status(&lead, &seg, 200);
-    assert_eq!(fit.text, lead.full());
-    assert!(fit.tip_allowed);
 }
 
 // ── frame height / window ────────────────────────────────────────────────
@@ -455,25 +295,21 @@ fn frame_height_full_shrink_suppress() {
 
 #[test]
 fn window_offset_defaults_to_the_tail() {
-    assert_eq!(window_offset(0, None, None, 20, 6), 14);
-    assert_eq!(window_offset(0, None, None, 3, 6), 0);
-    assert_eq!(window_offset(0, None, None, 0, 6), 0);
+    assert_eq!(window_offset(0, None, 20, 6), 14);
+    assert_eq!(window_offset(0, None, 3, 6), 0);
+    assert_eq!(window_offset(0, None, 0, 6), 0);
 }
 
 #[test]
 fn window_offset_minimal_movement_and_clamps() {
     // Selection above the window pulls it up; below pushes it down.
-    assert_eq!(window_offset(5, Some(1), None, 20, 6), 1);
-    assert_eq!(window_offset(5, Some(11), None, 20, 6), 6);
+    assert_eq!(window_offset(5, Some(1), 20, 6), 1);
+    assert_eq!(window_offset(5, Some(11), 20, 6), 6);
     // Already visible → the window does not move at all.
-    assert_eq!(window_offset(5, Some(9), None, 20, 6), 5);
-    // Selection wins over the S1 anchor.
-    assert_eq!(window_offset(10, Some(1), Some(15), 20, 6), 1);
-    // Anchor alone drives the window when no row is selected.
-    assert_eq!(window_offset(10, None, Some(3), 20, 6), 3);
+    assert_eq!(window_offset(5, Some(9), 20, 6), 5);
     // Out-of-range targets fall back to the tail; offsets clamp.
-    assert_eq!(window_offset(0, Some(25), None, 20, 6), 14);
-    assert_eq!(window_offset(99, None, None, 20, 6), 14);
+    assert_eq!(window_offset(0, Some(25), 20, 6), 14);
+    assert_eq!(window_offset(99, None, 20, 6), 14);
 }
 
 #[test]
@@ -481,7 +317,7 @@ fn window_offset_keeps_every_row_reachable() {
     // 20 rows through a 6-row window: walking down and back up must visit all.
     let (mut off, mut seen) = (0, vec![false; 20]);
     for (t, seen_row) in seen.iter_mut().enumerate() {
-        off = window_offset(off, Some(t), None, 20, 6);
+        off = window_offset(off, Some(t), 20, 6);
         assert!(
             off <= t && t < off + 6,
             "row {t} not visible at offset {off}"
@@ -489,13 +325,69 @@ fn window_offset_keeps_every_row_reachable() {
         *seen_row = true;
     }
     for t in (0..20).rev() {
-        off = window_offset(off, Some(t), None, 20, 6);
+        off = window_offset(off, Some(t), 20, 6);
         assert!(
             off <= t && t < off + 6,
             "row {t} not visible at offset {off}"
         );
     }
     assert!(seen.iter().all(|s| *s));
+}
+
+// ── live face (Rev 2026-11-04) ───────────────────────────────────────────
+
+#[test]
+fn panel_title_badge_only_while_unacked() {
+    assert_eq!(panel_title(4, 0), "Tasks (4)");
+    assert_eq!(panel_title(4, 2), "Tasks (4) · 2 new");
+}
+
+#[test]
+fn live_face_height_caps_shrinks_suppresses() {
+    assert_eq!(live_face_height(3, false, 10), 3);
+    assert_eq!(live_face_height(3, true, 10), 4); // overflow line under the rows
+    assert_eq!(live_face_height(9, true, 10), 7); // rows cap at 6
+    assert_eq!(live_face_height(3, true, 3), 3); // shrink to what fits
+    assert_eq!(live_face_height(3, true, 0), 0); // suppressed
+}
+
+#[test]
+fn live_row_widths_strip_the_files_column() {
+    assert_eq!(live_row_widths(40, 16), (16, 24));
+    assert_eq!(live_row_widths(20, 5), (12, 8)); // name floor 12
+    assert_eq!(live_row_widths(20, 100), (16, 4)); // name cap 16
+    // Physics: the name alone may eat the whole budget.
+    assert_eq!(live_row_widths(10, 16), (10, 0));
+    assert_eq!(live_row_widths(0, 16), (0, 0));
+}
+
+#[test]
+fn overflow_line_counts_and_degrades_tail_first() {
+    assert_eq!(overflow_line(0, 0, 80), None); // nothing hidden → no line
+    assert_eq!(
+        overflow_line(3, 2, 80),
+        Some("+ 3 more · + 2 done · ^T tasks".to_string())
+    );
+    assert_eq!(
+        overflow_line(3, 0, 80),
+        Some("+ 3 more · ^T tasks".to_string())
+    );
+    assert_eq!(
+        overflow_line(0, 2, 80),
+        Some("+ 2 done · ^T tasks".to_string())
+    );
+    // The hint dies first (discoverability, not data), then the done count.
+    assert_eq!(
+        overflow_line(3, 2, w("+ 3 more · + 2 done")),
+        Some("+ 3 more · + 2 done".to_string())
+    );
+    assert_eq!(
+        overflow_line(3, 2, w("+ 3 more")),
+        Some("+ 3 more".to_string())
+    );
+    // Physics: hard-cut from the head's tail.
+    let got = overflow_line(30, 2, 5).unwrap();
+    assert!(w(&got) <= 5, "overflow line overshoots: {got:?}");
 }
 
 // ── row columns ──────────────────────────────────────────────────────────

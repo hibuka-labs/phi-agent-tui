@@ -2,10 +2,11 @@
 //!
 //! Split impl of `App` (methods live here, state stays on `App`): tracking
 //! entries appear at spawn (registry snapshot reconciliation, Phase 5), flip
-//! to done on child exit, and are reaped 3 s after completion — but never
-//! while the root is busy or the user is inspecting the panel. Also owns the
-//! per-child streaming buffers (each child gets its own stream state so two
-//! interleaved children can't chop each other's pending text).
+//! to done on child exit, and leave at the design's death sweeps (Rev
+//! 2026-11-04 death table 死期表) — never under the user's eyes: the pinned row is
+//! exempt and a sweep never takes a row the display set still owes. Also
+//! owns the per-child streaming buffers (each child gets its own stream
+//! state so two interleaved children can't chop each other's pending text).
 
 use std::time::{Duration, Instant};
 
@@ -17,25 +18,17 @@ use phi_tui::transcript::DEFAULT_WRAP_WIDTH;
 
 use crate::app::{AgentStatus, App, BackgroundTaskEntry, Phase, SubAgentState, SubAgentStatus};
 use crate::task_focus::FocusTarget;
-use crate::task_layout::{
-    LeadPieces, LedgerMark, StatusFit, TaskCounts, TaskSegment, compose_status, fit_status,
-    ledger_line, parse_ledger_marker,
-};
+use crate::task_layout::{LeadPieces, StatusFit, fit_lead, ledger_line};
 use crate::theme::ShellToken;
 
 use super::bg_wake::{MAX_TAIL_PER_TASK, may_reap};
 
-/// How long a completed background task stays visible in the panel before
-/// auto-reap. Shared by the reaper and the reconcile upsert guard (which
-/// refuses to resurrect terminal snapshots already past this window) so the
-/// two thresholds can never drift apart.
-const BACKGROUND_REAP_AFTER: Duration = Duration::from_secs(3);
-
-/// Row lifetime after completion: Done/Cancelled rows get the 3s review
-/// window, Failed rows stay 30s — a failure is the row the user most needs
-/// to see, and 3s is a glance (design F8).
-const REAP_AFTER_DONE: Duration = Duration::from_secs(3);
-const REAP_AFTER_FAILED: Duration = Duration::from_secs(30);
+/// Window in which a terminal background snapshot may still be inserted for
+/// rows this panel never tracked (the "finished between two polls" race): a
+/// first sighting past this age is history, not news — inserting it would
+/// only re-add what a sweep just dropped (and re-report a wake that already
+/// fired). Entries already tracked keep receiving status updates regardless.
+const TERMINAL_INSERT_WINDOW: Duration = Duration::from_secs(3);
 
 /// Live state for the thinking panel of the focused agent: pre-wrapped tail
 /// lines (unprefixed — the panel title owns agent attribution), the agent id
@@ -47,12 +40,23 @@ pub(crate) struct ThinkingPanelState {
 }
 
 /// One row of the combined task panel: sub-agents first (spawn order), then
-/// background shell tasks. `FocusTarget::TaskList(i)` indexes this order —
-/// every consumer (render, keyboard nav, focus clamping) must agree on it.
+/// background shell tasks. `FocusTarget::TaskList(id)` carries [`TaskRow::id`]
+/// — every consumer (render, keyboard nav, focus landing) keys rows by it,
+/// never by index (Rev 2026-11-04: rows hide at terminal, indices shift).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TaskRow {
     SubAgent(String),
     Background(String),
+}
+
+impl TaskRow {
+    /// The row's stable identity: the agent path / background task id.
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            TaskRow::SubAgent(path) => path,
+            TaskRow::Background(id) => id,
+        }
+    }
 }
 
 impl App {
@@ -90,9 +94,9 @@ impl App {
     /// fact delivered twice (Progress then Batch) records once.
     ///
     /// On the flip it writes the run's **permanent** ledger marker into the
-    /// root transcript (grep-able after the row is reaped) and the same text
-    /// as the child transcript's verdict, records the counts ledger, and —
-    /// for the first failure while collapsed — arms the auto-expand.
+    /// root transcript (grep-able after the row is swept) and the same text
+    /// as the child transcript's verdict, and — for a failure — arms the
+    /// unacked red remnant.
     pub(crate) fn finalize_sub_agent(&mut self, agent_path: &str, status: SubAgentStatus) {
         if matches!(status, SubAgentStatus::Running) {
             return; // not a terminal
@@ -134,35 +138,18 @@ impl App {
             tool_state: None,
         });
 
-        self.task_panel.counts.record(&status);
         if matches!(status, SubAgentStatus::Failed { .. }) {
-            self.task_panel.unacked_failures += 1;
-            self.arm_auto_expand(agent_path);
+            // The red remnant: an unacked failure stays on the face until
+            // the user comes to look (frame open / row inspected). A failure
+            // is the row the user most needs to see — it is why the remnant
+            // replaces the old failure auto-expand (F5, retired).
+            self.task_panel
+                .unacked_failures
+                .insert(agent_path.to_string());
         }
         self.refresh_waiting_count();
         self.sync_task_window();
-    }
-
-    /// Failure auto-expand (design detail 3 / F5): the first failure while
-    /// collapsed pops the frame open to **S1** (no focus steal) with the
-    /// window anchored to the failed row so it lands inside the 6-row window.
-    /// At most one pop per turn; a manual collapse outranks it (F9).
-    fn arm_auto_expand(&mut self, failed_path: &str) {
-        if self.task_panel.frame_open
-            || self.task_panel.popped_this_turn
-            || self.task_panel.user_collapsed_this_turn
-        {
-            return;
-        }
-        // F5 fallback: the failed row may already be gone — anchor the tail.
-        let anchor = self
-            .task_rows()
-            .iter()
-            .position(|r| matches!(r, TaskRow::SubAgent(p) if p == failed_path));
-        self.task_panel.frame_open = true;
-        self.task_panel.popped_this_turn = true;
-        self.task_panel.s1_anchor = anchor;
-        self.sync_task_window();
+        self.auto_sweep();
     }
 
     /// A sub-agent run reached a terminal state (watcher Progress/Batch,
@@ -254,7 +241,7 @@ impl App {
     /// path for same-instant spawns), then background shell tasks (registry
     /// id order). Built fresh per call — the panel is a handful of rows, and
     /// a shared list would be one more thing to keep in sync.
-    pub(crate) fn task_rows(&self) -> Vec<TaskRow> {
+    fn all_task_rows(&self) -> Vec<TaskRow> {
         let mut subs: Vec<(Instant, &str)> = self
             .sub_agents
             .iter()
@@ -271,19 +258,54 @@ impl App {
             .collect()
     }
 
-    /// Row count of the combined panel (`FocusTarget::TaskList` bounds).
-    pub(crate) fn task_row_count(&self) -> usize {
-        self.sub_agents.len() + self.background_tasks.len()
+    /// The display set (Rev 2026-11-04, row set 行集): running rows, unacked-failure
+    /// remnants, dim corpses (touched rows that landed terminal) and the
+    /// pinned row. A row that lands terminal untouched hides **the moment it
+    /// lands** (hide-on-complete 完成即隐) — the store keeps it only until the next death
+    /// sweep, so a late fan-in report still finds its entry.
+    pub(crate) fn task_rows(&self) -> Vec<TaskRow> {
+        self.all_task_rows()
+            .into_iter()
+            .filter(|r| self.row_visible(r))
+            .collect()
     }
 
-    /// Whether the task panel should be shown: anything worth a switchable
-    /// row — sub-agents and background shell tasks. The transcript still
-    /// carries each bg task's launch/completion records and the status bar
-    /// its counter; the panel is where the user *inspects* one (live output
-    /// tail), which is what the incident asked for ("cannot see what the
-    /// background work is doing").
+    /// Whether a row belongs to the display set (see [`Self::task_rows`]).
+    fn row_visible(&self, row: &TaskRow) -> bool {
+        let id = row.id();
+        if self.task_panel.is_selected(id) {
+            return true; // inspection freeze 检视冻结: the pinned row never leaves
+        }
+        match row {
+            TaskRow::SubAgent(path) => {
+                let Some(state) = self.sub_agents.get(path) else {
+                    return false;
+                };
+                match state.status {
+                    SubAgentStatus::Running => true,
+                    _ => {
+                        self.task_panel.touched.contains(id)
+                            || (matches!(state.status, SubAgentStatus::Failed { .. })
+                                && self.task_panel.unacked_failures.contains(id))
+                    }
+                }
+            }
+            TaskRow::Background(bg_id) => self.background_tasks.get(bg_id).is_some_and(|t| {
+                t.status == BackgroundTaskStatus::Running || self.task_panel.touched.contains(id)
+            }),
+        }
+    }
+
+    /// Row count of the display set (frame height, window bounds).
+    pub(crate) fn task_row_count(&self) -> usize {
+        self.task_rows().len()
+    }
+
+    /// Whether there is anything worth a switchable row: the display set is
+    /// the panel (Rev 2026-11-04 — a session with only swept history has no
+    /// face; the transcript markers are its ledger).
     pub fn should_show_task_panel(&self) -> bool {
-        !self.sub_agents.is_empty() || !self.background_tasks.is_empty()
+        !self.task_rows().is_empty()
     }
 
     /// Poll the background task registry for status updates (called every tick).
@@ -313,22 +335,19 @@ impl App {
             snapshots.iter().map(|s| s.id.clone()).collect();
 
         for snap in &snapshots {
-            // Never (re-)insert a terminal snapshot whose `finished_at` is
-            // already past the reap window. The registry keeps finished tasks
-            // until its own much longer GC TTL expires, so once the panel has
-            // shown and reaped a task, `snapshot_all` still reports it —
-            // re-inserting it here gets it re-reaped on the same pass, every
-            // tick (the reap → re-add → reap loop). This is safe because the
-            // entry's `finished_at` IS the registry's timestamp and the reap
-            // only ever fires at `BACKGROUND_REAP_AFTER` age: a snapshot past
-            // that age has already been shown and reaped, or was never seen
-            // before its display window closed. Entries still present keep
-            // receiving status updates below.
+            // Never (re-)insert a terminal snapshot this panel never tracked
+            // (or already dropped) once it is past the insert window. The
+            // registry keeps finished tasks until its own much longer GC TTL
+            // expires, so `snapshot_all` reports long-dead work every tick —
+            // inserting it would resurrect swept rows and re-arm a wake debt
+            // that already fired. A fresh terminal snapshot (finished
+            // between two polls) is still inserted: its wake report is owed.
+            // Entries already tracked keep receiving status updates below.
             if !self.background_tasks.contains_key(&snap.id)
                 && snap.status != BackgroundTaskStatus::Running
                 && snap
                     .finished_at
-                    .is_some_and(|at| at.elapsed() >= BACKGROUND_REAP_AFTER)
+                    .is_some_and(|at| at.elapsed() >= TERMINAL_INSERT_WINDOW)
             {
                 continue;
             }
@@ -378,7 +397,10 @@ impl App {
                     changed = true;
                 }
             }
-            if is_new {
+            // A fresh *running* row changes the face; a fresh terminal
+            // insert is wake-debt bookkeeping only (the display set hides
+            // untouched terminal rows) and must not dirty every re-add.
+            if is_new && snap.status == BackgroundTaskStatus::Running {
                 changed = true;
             }
         }
@@ -399,38 +421,6 @@ impl App {
         for id in stale_ids {
             self.background_tasks.remove(&id);
             changed = true;
-        }
-
-        // Auto-reap completed background tasks (Done/TimedOut/Cancelled/Error)
-        // after 3 seconds, but only when root is Idle and the task frame is
-        // closed (框开 = 冻结回收 — S1 included; S2 is a subset of frame_open).
-        // We reap regardless of whether the task is still in the registry,
-        // because the registry's GC TTL (5 min) is much longer than our
-        // desired panel display time (3s).
-        if matches!(self.status, AgentStatus::Idle) && !self.task_panel.frame_open {
-            let now = Instant::now();
-            let reap_ids: Vec<String> = self
-                .background_tasks
-                .iter()
-                .filter(|(_, t)| {
-                    t.status != BackgroundTaskStatus::Running
-                        && t.finished_at
-                            .is_some_and(|at| now.duration_since(at) >= BACKGROUND_REAP_AFTER)
-                        && may_reap(t)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            if !reap_ids.is_empty() {
-                tracing::info!(
-                    reap_count = reap_ids.len(),
-                    reap_ids = ?reap_ids,
-                    "reconcile: reaping background tasks"
-                );
-            }
-            for id in reap_ids {
-                self.background_tasks.remove(&id);
-                changed = true;
-            }
         }
 
         changed
@@ -510,70 +500,98 @@ impl App {
         self.refresh_waiting_count();
     }
 
-    /// Remove completed sub-agents past their review window — 3s for
-    /// Done/Cancelled, 30s for Failed (F8: a failure is the row the user
-    /// most needs to see). Never while the root is busy (the finished
-    /// children's transcripts are the only review surface mid-run) and
-    /// never while the frame is open (框开 = 冻结回收 — reaping under the
-    /// user's eyes is the "can't see what the sub-agent did" bug).
-    /// Collapsing the frame calls this immediately, so rows already over-age
-    /// go the moment the user stops looking.
-    pub fn cleanup_completed_agents(&mut self) -> bool {
-        if !matches!(self.status, AgentStatus::Idle) {
-            return false;
-        }
-        if self.task_panel.frame_open {
-            return false;
-        }
-        let now = Instant::now();
+    /// Death sweep (Rev 2026-11-04, death table 死期表): drop every terminal row the
+    /// display set no longer owes — swept rows leave the store and their
+    /// per-child buffers with them. Spared: running rows, the pinned row
+    /// (inspection freeze 检视冻结), unacked failures (the red remnant), and background
+    /// entries still owing a wake report (`may_reap`, issue #29). Untouched
+    /// invisible rows go too — they are store debris, not display.
+    pub fn sweep_task_rows(&mut self) -> bool {
+        let selected = self.task_panel.selected_id().map(str::to_string);
         let mut removed = false;
-        let ids_to_remove: Vec<String> = self
+
+        let subs: Vec<String> = self
             .sub_agents
             .iter()
-            .filter(|(_, state)| {
-                let ttl = if matches!(state.status, SubAgentStatus::Failed { .. }) {
-                    REAP_AFTER_FAILED
-                } else {
-                    REAP_AFTER_DONE
-                };
+            .filter(|(path, state)| {
                 !matches!(state.status, SubAgentStatus::Running)
-                    && state
-                        .completed_at
-                        .is_some_and(|at| now.duration_since(at) >= ttl)
+                    && selected.as_deref() != Some(path.as_str())
+                    && !self.task_panel.unacked_failures.contains(path.as_str())
             })
-            .map(|(id, _)| id.clone())
+            .map(|(path, _)| path.clone())
             .collect();
-
-        for id in ids_to_remove {
+        for id in subs {
             self.sub_agents.remove(&id);
             self.sub_agent_transcripts.remove(&id);
             self.child_streams.remove(&id);
             self.thinking_since.remove(&id);
+            self.task_panel.touched.remove(&id);
             removed = true;
         }
 
-        // Reset focus if it's now out of bounds (rows may have vanished).
-        self.clamp_task_focus();
-        self.sync_task_window();
+        let bgs: Vec<String> = self
+            .background_tasks
+            .iter()
+            .filter(|(id, task)| {
+                task.status != BackgroundTaskStatus::Running
+                    && selected.as_deref() != Some(id.as_str())
+                    && may_reap(task)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in bgs {
+            self.background_tasks.remove(&id);
+            self.task_panel.touched.remove(&id);
+            removed = true;
+        }
 
+        if removed {
+            self.clamp_task_focus();
+            self.sync_task_window();
+        }
         removed
     }
 
-    /// Rebuild the counts ledger from the root transcript's permanent
-    /// markers (resume path: rows are runtime-only and start empty, but the
-    /// markers survived in the replay). Terminal markers only — ✓+✗+— always
-    /// equals the marker count (对账式).
-    pub fn recount_task_ledger(&mut self) {
-        let mut counts = TaskCounts::default();
-        for line in &self.transcript.output {
-            match parse_ledger_marker(&line.text) {
-                Some(LedgerMark::Done) => counts.done += 1,
-                Some(LedgerMark::Failed) => counts.failed += 1,
-                Some(LedgerMark::Cancelled) => counts.cancelled += 1,
-                None => {}
-            }
+    /// All-complete sweep (Rev 2026-11-04, 全完成清场): when nothing is running, no failure is
+    /// waiting for an ack, and nobody is selected, the corpses go — and with
+    /// them the whole face (principle ③ 框跟着事走 — the frame follows the work). A selection blocks the sweep
+    /// (a selection waits for the next death point 有选中 → 等下一死期).
+    pub fn auto_sweep(&mut self) -> bool {
+        let running = self.running_sub_agents()
+            + self
+                .background_tasks
+                .values()
+                .filter(|t| t.status == BackgroundTaskStatus::Running)
+                .count();
+        let quiet = running == 0
+            && self.task_panel.unacked_failures.is_empty()
+            && self.task_panel.selected_id().is_none();
+        if !quiet {
+            return false;
         }
-        self.task_panel.counts = counts;
+        let removed = self.sweep_task_rows();
+        self.teardown_task_frame_if_empty();
+        removed
+    }
+
+    /// Turn-end sweep (Rev 2026-11-04, turn 收尾清场): corpses go at the root turn end —
+    /// principle ② 尸体不跨 turn (corpses do not cross a turn). The pinned row is exempt (attention follows the
+    /// user, not the turn — the one sanctioned principle-① exception).
+    /// Focus is never touched: the set can only empty while focus is Input
+    /// (a pinned row keeps itself in the set).
+    pub fn turn_end_sweep(&mut self) -> bool {
+        let removed = self.sweep_task_rows();
+        self.teardown_task_frame_if_empty();
+        removed
+    }
+
+    /// principle ③ 框跟着事走 (the frame follows the work): with no row left to show, the frame and the live
+    /// face vanish together and the keyboard rests at the composer.
+    fn teardown_task_frame_if_empty(&mut self) {
+        if self.task_rows().is_empty() {
+            self.task_panel.frame_open = false;
+            self.task_panel.focus = FocusTarget::Input;
+        }
     }
 
     /// Commit any pending streaming text/thought into the transcript (thought
@@ -697,13 +715,17 @@ impl App {
                     chars,
                 })
             }
-            FocusTarget::TaskList(index) => {
+            FocusTarget::TaskList(id) => {
                 // Background rows have no thought stream — only a sub-agent
                 // row can be the focused "thinking" subject.
-                let TaskRow::SubAgent(id) = self.task_rows().get(*index)?.clone() else {
+                let TaskRow::SubAgent(agent) = self
+                    .task_rows()
+                    .into_iter()
+                    .find(|r| r.id() == id.as_str())?
+                else {
                     return None;
                 };
-                let stream = self.child_streams.get(&id)?;
+                let stream = self.child_streams.get(&agent)?;
                 let (lines, kind) = stream.tail_lines()?;
                 if kind != LineKind::Thought {
                     return None;
@@ -711,7 +733,7 @@ impl App {
                 let chars = stream.tail_raw().map_or(0, |(raw, _)| raw.chars().count());
                 Some(ThinkingPanelState {
                     lines: lines.to_vec(),
-                    agent: Some(id),
+                    agent: Some(agent),
                     chars,
                 })
             }
@@ -852,34 +874,26 @@ impl App {
         }
     }
 
-    /// The task segment appended to the process row — mounted once a session
-    /// has task history (rows now, or recorded counts). A session that has
-    /// never had a task renders its process row untouched.
-    pub(crate) fn task_segment(&self) -> TaskSegment {
-        TaskSegment {
-            counts: self.task_panel.counts,
-            running: self
-                .sub_agents
-                .values()
-                .filter(|s| matches!(s.status, SubAgentStatus::Running))
-                .count(),
-            frame_open: self.task_panel.frame_open,
-            show: self.task_panel.counts.total() > 0 || self.should_show_task_panel(),
-        }
-    }
-
-    /// The process-status line (§9.6) at its wide string-table form.
+    /// The process-status line (§9.6) at its wide string-table form. Tasks
+    /// no longer append a segment here (Rev 2026-11-04) — they are rows on
+    /// the live face / frame, not a count strip.
     pub fn status_line(&self) -> String {
-        compose_status(&self.status_leads(), &self.task_segment())
+        self.status_leads().full()
     }
 
     /// The process row squeezed for `width` columns (status-strip text +
     /// whether a Tip may still ride behind it).
     pub fn status_fit(&self, width: usize) -> StatusFit {
-        fit_status(&self.status_leads(), &self.task_segment(), width)
+        fit_lead(&self.status_leads(), width)
     }
 }
 
+#[cfg(test)]
+#[path = "task_panel_bg_tests.rs"]
+mod task_panel_bg_tests;
+#[cfg(test)]
+#[path = "task_panel_snapshot_tests.rs"]
+mod task_panel_snapshot_tests;
 #[cfg(test)]
 #[path = "task_panel_tests.rs"]
 mod task_panel_tests;

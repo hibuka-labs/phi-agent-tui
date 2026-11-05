@@ -134,7 +134,7 @@ impl App {
 
         // Product panel recovery chord (keymap, default Ctrl+B): reopen the
         // design canvas (1C row 16). Global for the same reason as Ctrl+L —
-        // the crash face advertises "ctrl+b 重开", and an approval popup (a
+        // the crash face advertises "ctrl+b reopen", and an approval popup (a
         // canvas consent prompt is exactly the one that is up when the server
         // dies) must not swallow the recovery key it advertises. A chord can
         // never be an approval decision.
@@ -298,7 +298,14 @@ impl App {
                 }
                 None
             }
+            // Typing takeover (Rev 2026-11-04, 打字即接管): typing/Enter/paste hands the
+            // keyboard back to the composer first — the reply must be
+            // readable on the root transcript. The pinned row demotes to a
+            // corpse like any other (the sweep that reaps it is a death
+            // sweep's job). ↑↓/Esc/Ctrl+T/Home/End/PgUp/PgDn never steal —
+            // they are the list's own keys.
             Enter if ctrl => {
+                self.steal_focus_to_composer();
                 // Ctrl+Enter: force-send (simplified `chat:sendNow`). Queue
                 // the draft and interrupt the turn so the queue goes out right
                 // away (the terminal flush delivers it). With nothing to send
@@ -318,6 +325,7 @@ impl App {
                 }
             }
             Enter => {
+                self.steal_focus_to_composer();
                 if shift {
                     self.composer.insert_char('\n');
                     None
@@ -434,16 +442,19 @@ impl App {
                     && self.composer.is_empty()
                     && !self.skill_summaries.is_empty() =>
             {
+                self.steal_focus_to_composer();
                 self.composer.insert_char(c);
                 self.start_slash();
                 None
             }
             Char(c) if c == self.keymap.mention_trigger => {
+                self.steal_focus_to_composer();
                 self.composer.insert_char(c);
                 self.start_mention();
                 None
             }
             Char(c) => {
+                self.steal_focus_to_composer();
                 self.composer.insert_char(c);
                 None
             }

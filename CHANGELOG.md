@@ -4,6 +4,25 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+### Added
+- **Two death sweeps for the task rows, with their exemptions** (Rev 2026-11-04).
+  The all-complete sweep fires when nothing is running and no failure is
+  unacknowledged; the turn-end sweep fires at the root turn end, so a corpse
+  never crosses a turn. The pinned row is exempt — the inspection freeze keeps
+  the row the user is reading alive past its death point.
+- **Typing takeover**: typing, Enter or paste hands the keyboard back to the
+  composer, so the reply is readable on the root transcript. The list's own
+  keys (↑↓/Esc/Ctrl+T/Home/End/PgUp/PgDn) never steal focus.
+
+### Changed
+- **The task face shows live rows instead of a count strip** (Rev 2026-11-04).
+  The middle panel renders the rows themselves — running rows, an
+  unacknowledged failure as a red remnant, and the pinned row. Rows are keyed
+  by id (`FocusTarget::TaskList(id)`), so focus follows the row across a
+  re-render instead of an index that a dying row shifts. The frameless live
+  face is capped at 6 rows and reuses the framed row render with the files
+  column stripped.
+
 ## [0.1.0] — 2026-11-02
 
 First release: the terminal-app shell extracted from phimint's TUI as a

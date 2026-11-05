@@ -1025,7 +1025,7 @@ fn ctrl_l_requests_full_repaint() {
 
 #[test]
 fn ctrl_b_reopens_the_canvas_even_mid_approval() {
-    // Row 16: the crash face advertises "ctrl+b 重开", and the consent prompt
+    // Row 16: the crash face advertises "ctrl+b reopen", and the consent prompt
     // of the canvas that just died is exactly the popup that would otherwise
     // swallow the key. A chord can never be an approval decision, so it must
     // route globally like Ctrl+L.
@@ -1617,6 +1617,9 @@ fn sub_agent_text_is_labeled_and_lifecycle_tracked() {
         app.sub_agents.get("root/a").map(|s| &s.status),
         Some(&SubAgentStatus::Running)
     );
+    // Pin (inspection freeze 检视冻结): the sole row's terminal fact triggers the all-complete sweep, and
+    // the assertions below need the entry and its child transcript.
+    app.task_panel.focus = FocusTarget::TaskList("root/a".to_string());
     app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert_eq!(
         app.sub_agents.get("root/a").map(|s| &s.status),
@@ -1677,17 +1680,38 @@ fn sub_agent_tool_calls_are_labeled() {
 }
 
 #[test]
-fn sub_agents_cleared_on_root_finish() {
+fn root_finish_sweeps_the_corpses_left_behind() {
     let mut app = App::new();
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "hi")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
-    // The terminal fact comes from the wire, not the child's RunFinished.
+    // A running daemon (dev server) blocks the all-complete sweep at the terminal —
+    // auto_sweep counts every running background row …
+    app.background_tasks.insert(
+        "bg_daemon".to_string(),
+        BackgroundTaskEntry {
+            id: "bg_daemon".to_string(),
+            command: "npm run dev".to_string(),
+            timeout_ms: 0,
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            finished_at: None,
+            reported: false,
+            output_tail: String::new(),
+            consumed: false,
+        },
+    );
     app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
-    assert!(!app.sub_agents.is_empty());
-    // Root settle wipes the panel rows unless the user is looking at the
-    // frame (框开 = 冻结回收).
+    assert!(
+        app.sub_agents.contains_key("root/a"),
+        "the daemon blocks the all-complete sweep"
+    );
+
+    // … but root settle runs the turn-end sweep (Rev 2026-11-04, principle ②: corpses do not cross
+    // turn): the corpse goes and the daemon row stays — a server left
+    // running is the product working as intended.
     app.handle_event(TuiEvent::Runtime(run_finished(None)));
-    assert!(app.sub_agents.is_empty());
+    assert!(!app.sub_agents.contains_key("root/a"), "turn-end sweep");
+    assert!(app.background_tasks.contains_key("bg_daemon"));
 }
 
 #[test]
@@ -1703,6 +1727,8 @@ fn sub_agent_run_finished_does_not_end_turn() {
     assert!(app.running);
     assert!(matches!(app.status, AgentStatus::Running { .. }));
     // Even the child's terminal fact (wire-driven) must not end the root turn.
+    // The pin (inspection freeze 检视冻结) only keeps the entry readable past its sweep.
+    app.task_panel.focus = FocusTarget::TaskList("root/a".to_string());
     app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(app.running);
     assert!(matches!(app.status, AgentStatus::Running { .. }));
@@ -1747,6 +1773,8 @@ fn child_deltas_bypass_main_stream_tail() {
     // Child content is preserved, committed ahead of the done marker.
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
     // The verdict is written when the terminal fact lands (wire/lifecycle).
+    // The pin (inspection freeze 检视冻结) keeps the transcript past the all-complete sweep for the reads.
+    app.task_panel.focus = FocusTarget::TaskList("root/a".to_string());
     app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     let sub_texts: Vec<&str> = app
         .sub_agent_transcripts
@@ -1821,20 +1849,23 @@ fn root_tail_survives_child_interleaving() {
 }
 
 #[test]
-fn cleanup_completed_agents_drops_child_stream() {
+fn sweep_drops_child_stream() {
     let mut app = App::new();
     app.handle_event(TuiEvent::Runtime(child_text("root/a", "some prose")));
     app.handle_event(TuiEvent::Runtime(run_finished(Some("root/a"))));
-    // Terminal fact (wire) flips the row; only terminal rows reap.
+    // A still-running sibling blocks the all-complete sweep, so the buffers survive the
+    // terminal fact and the sweep below is the one under test (Rev 2026-11-04:
+    // death sweeps, no TTL).
+    app.handle_event(TuiEvent::Runtime(child_text("root/keep", "sibling")));
     app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
     assert!(app.child_streams.contains_key("root/a"));
-    // Backdate past the 3s reap delay, then reap from Idle.
-    app.status = AgentStatus::Idle;
-    app.sub_agents.get_mut("root/a").unwrap().completed_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
-    assert!(app.cleanup_completed_agents());
+    assert!(app.turn_end_sweep());
     assert!(!app.child_streams.contains_key("root/a"));
     assert!(!app.sub_agent_transcripts.contains_key("root/a"));
+    assert!(
+        app.sub_agents.contains_key("root/keep"),
+        "running rows survive the sweep"
+    );
 }
 
 #[test]

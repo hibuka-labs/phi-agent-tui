@@ -1,20 +1,21 @@
-//! Pure layout and wording for the task panel and the process-row task
-//! segment (design 20261103: 字符串表 / glyph 表 / 挤压梯 / FAILED 条件格式).
+//! Pure layout and wording for the task panel faces and the process row
+//! (Rev 2026-11-04: live rows replace the count strip 活行面替代计数条).
 //!
 //! Data in, data out: no terminal, no `App` state. `render.rs` maps the
-//! returned faces to theme colors, `app.rs` folds the returned strings into
-//! the status line, `task_panel.rs` keeps the counters. Everything the design
-//! doc pinned as「照抄」lives here so the wording has exactly one home.
+//! returned faces to theme colors, `task_panel.rs` keeps the lifecycle
+//! bookkeeping. Everything the design doc pins as wording lives here so it
+//! has exactly one home.
 
 use std::time::Duration;
 
+use phi_kernel_tools::background_shell::BackgroundTaskStatus;
 use phi_tui::wrap::{Elide, elide, pad_cols};
 use unicode_width::UnicodeWidthStr;
 
 /// A row's lifecycle state — the display vocabulary shared by the glyph
-/// table, the counts ledger and the ledger markers. `Failed` carries the
-/// error summary verbatim (the run's only failure fact — `RunOutcome` has no
-/// exit-code field, so nothing here ever invents one).
+/// table and the ledger markers. `Failed` carries the error summary verbatim
+/// (the run's only failure fact — `RunOutcome` has no exit-code field, so
+/// nothing here ever invents one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubAgentStatus {
     /// In flight (registry `queued`/`running` merge into this one bucket).
@@ -80,6 +81,30 @@ pub fn wire_status(status: &str, summary: Option<&str>) -> Option<SubAgentStatus
         }),
         "closed" => Some(SubAgentStatus::Cancelled),
         _ => None,
+    }
+}
+
+/// The glyph table for a background task row — the same shape vocabulary as
+/// [`status_glyph`] (`*` running, `+` done, `!` failed/timed out, `-`
+/// cancelled), so both row kinds read alike.
+pub fn bg_glyph(status: &BackgroundTaskStatus) -> (&'static str, RowTint) {
+    match status {
+        BackgroundTaskStatus::Running => ("*", RowTint::Running),
+        BackgroundTaskStatus::Done => ("+", RowTint::Done),
+        BackgroundTaskStatus::TimedOut => ("!", RowTint::Warn),
+        BackgroundTaskStatus::Cancelled => ("-", RowTint::Warn),
+        BackgroundTaskStatus::Error(_) => ("!", RowTint::Error),
+    }
+}
+
+/// One-word status for a background row's activity cell / tail title.
+pub fn bg_status_word(status: &BackgroundTaskStatus) -> &'static str {
+    match status {
+        BackgroundTaskStatus::Running => "running",
+        BackgroundTaskStatus::Done => "done",
+        BackgroundTaskStatus::TimedOut => "timeout",
+        BackgroundTaskStatus::Cancelled => "cancelled",
+        BackgroundTaskStatus::Error(_) => "error",
     }
 }
 
@@ -162,7 +187,7 @@ pub fn format_time(elapsed: Duration) -> String {
 }
 
 /// The root transcript's permanent ledger line for a terminal run (design
-/// detail 6): grep-able after the row is reaped. `Running` is not a terminal
+/// detail 6): grep-able after the row is swept. `Running` is not a terminal
 /// and has no ledger line — callers finalize first.
 pub fn ledger_line(path: &str, status: &SubAgentStatus, elapsed: Duration) -> String {
     match status {
@@ -173,163 +198,9 @@ pub fn ledger_line(path: &str, status: &SubAgentStatus, elapsed: Duration) -> St
     }
 }
 
-/// What a root-ledger terminal marker records — the resume recount's input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LedgerMark {
-    /// `* [id] done (…)`.
-    Done,
-    /// `* [id] FAILED (…)`.
-    Failed,
-    /// `* [id] CANCELLED`.
-    Cancelled,
-}
-
-/// Recognize a terminal ledger line written by [`ledger_line`]. The
-/// `started` line and everything else read as `None` — a count may only come
-/// from a terminal marker (对账式: ✓+✗+— = 终态标记条数, 不含 started).
-pub fn parse_ledger_marker(line: &str) -> Option<LedgerMark> {
-    let rest = line.strip_prefix("* [")?;
-    let close = rest.find(']')?;
-    let after = rest[close + 1..].strip_prefix(' ')?;
-    // Match the verdict word only — done lines carry ` (2m13s)`, FAILED
-    // lines carry ` (…)` or nothing.
-    match after.split(' ').next().unwrap_or(after) {
-        "done" => Some(LedgerMark::Done),
-        "FAILED" => Some(LedgerMark::Failed),
-        "CANCELLED" => Some(LedgerMark::Cancelled),
-        _ => None,
-    }
-}
-
-/// Session-cumulative terminal counts (design detail 4: the ledger markers
-/// are the source; rows may be reaped, these numbers never drop).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TaskCounts {
-    /// `✓` — finished clean.
-    pub done: usize,
-    /// `✗` — failed (timeouts included: they are failures).
-    pub failed: usize,
-    /// `—` — cancelled (its own bucket, never red).
-    pub cancelled: usize,
-}
-
-impl TaskCounts {
-    /// Terminal markers recorded so far.
-    pub fn total(&self) -> usize {
-        self.done + self.failed + self.cancelled
-    }
-
-    /// Add one terminal run to its bucket.
-    pub fn record(&mut self, status: &SubAgentStatus) {
-        match status {
-            SubAgentStatus::Done => self.done += 1,
-            SubAgentStatus::Failed { .. } => self.failed += 1,
-            SubAgentStatus::Cancelled => self.cancelled += 1,
-            SubAgentStatus::Running => {}
-        }
-    }
-
-    /// ` · 7 total · 2 running · 3 done · 1 failed · 1 cancelled` (string
-    /// table, wide terminals). `total` counts every task seen this session
-    /// (running + terminal); `cancelled` rides only when nonzero (D9 — the
-    /// exception, not the rule). English wording is the product rule: the
-    /// fixed chrome ships to non-CJK markets too.
-    pub fn full_block(&self, running: usize) -> String {
-        let cancelled = if self.cancelled > 0 {
-            format!(" · {} cancelled", self.cancelled)
-        } else {
-            String::new()
-        };
-        format!(
-            " · {} total · {running} running · {} done · {} failed{cancelled}",
-            running + self.total(),
-            self.done,
-            self.failed
-        )
-    }
-
-    /// ` · 7t 2r 3d 1f 1c` — squeeze stage ① (the labels shrink to letters).
-    pub fn compact_block(&self, running: usize) -> String {
-        let cancelled = if self.cancelled > 0 {
-            format!(" {}c", self.cancelled)
-        } else {
-            String::new()
-        };
-        format!(
-            " · {}t {running}r {}d {}f{cancelled}",
-            running + self.total(),
-            self.done,
-            self.failed
-        )
-    }
-}
-
-/// The two-state trigger hint (string table). `short` is squeeze stage ④ —
-/// the hint shrinks before it dies, and it dies last: discoverability was
-/// sewn in by hand, so it is the last thing to go.
-pub fn hint_block(frame_open: bool, short: bool) -> String {
-    let (full, brief) = match (frame_open, short) {
-        (false, _) => ("Ctrl+T tasks", "^T tasks"),
-        (true, _) => ("Ctrl+T close", "^T close"),
-    };
-    if short {
-        format!(" · {brief}")
-    } else {
-        format!(" · {full}")
-    }
-}
-
-/// The frame's title (string table, design mock `Tasks (23) · 1 new`): the
-/// live row count plus the unacked-failure badge. Lives here with the rest of
-/// the string table — the `·` is a deliberate design glyph (CJK-ambiguous
-/// width; every consumer measures with display columns).
-pub fn panel_title(total: usize, unacked_failures: usize) -> String {
-    if unacked_failures > 0 {
-        format!("Tasks ({total}) · {unacked_failures} new")
-    } else {
-        format!("Tasks ({total})")
-    }
-}
-
-/// The task segment appended to the process row (design detail 1). Mounted
-/// only once a session has task history (`show`) — a session that has never
-/// had a task renders its process row untouched (string table, S0 空).
-#[derive(Debug, Clone, Default)]
-pub struct TaskSegment {
-    /// Session-cumulative counts (zeros included while everything runs).
-    pub counts: TaskCounts,
-    /// Live running sub-agent rows — the `running` bucket (the counts are
-    /// terminal-only by the ledger rule).
-    pub running: usize,
-    /// Frame-open state — picks the hint's wording.
-    pub frame_open: bool,
-    /// Whether the segment is mounted at all (task history exists).
-    pub show: bool,
-}
-
-impl TaskSegment {
-    /// The counts + hint blocks at one degradation level of the squeeze
-    /// ladder (`counts_compact` = stage ①, `hint`: `Some(false)` wide /
-    /// `Some(true)` = stage ④ short / `None` = the hint is dead).
-    fn blocks(&self, counts_compact: bool, hint: Option<bool>) -> String {
-        if !self.show {
-            return String::new();
-        }
-        let counts = if counts_compact {
-            self.counts.compact_block(self.running)
-        } else {
-            self.counts.full_block(self.running)
-        };
-        match hint {
-            Some(short) => format!("{}{}", counts, hint_block(self.frame_open, short)),
-            None => counts,
-        }
-    }
-}
-
 /// The process row's lead text (spinner/phase/waiting) split at the activity
 /// suffix so the squeeze ladder can trim it in stages (string table rank:
-/// spinner/phase > waiting 文 > 计数 > 提示 > Tip).
+/// spinner/phase > waiting 文 > Tip).
 #[derive(Debug, Clone)]
 pub struct LeadPieces {
     /// Everything before the activity suffix (incl. the trailing `...`).
@@ -339,7 +210,8 @@ pub struct LeadPieces {
     /// Everything after the activity suffix (reassurance tail, cancel hint).
     pub tail: String,
     /// True for the waiting leads whose tail is the reassurance clause the
-    /// ladder drops at stage ③b. Phase leads keep theirs at every stage.
+    /// ladder drops at its last named stage. Phase leads keep theirs at
+    /// every stage.
     pub tail_is_reassurance: bool,
 }
 
@@ -349,12 +221,12 @@ impl LeadPieces {
         format!("{}{}{}", self.head, self.activity, self.tail)
     }
 
-    /// Stage ③a: activity suffix dropped.
+    /// Stage ①: activity suffix dropped.
     pub fn no_activity(&self) -> String {
         format!("{}{}", self.head, self.tail)
     }
 
-    /// Stage ③b: the reassurance tail dropped as well (phase leads keep it).
+    /// Stage ②: the reassurance tail dropped as well (phase leads keep it).
     pub fn min(&self) -> String {
         if self.tail_is_reassurance {
             self.head.clone()
@@ -370,7 +242,7 @@ pub const TIP_GAP: usize = 4;
 pub const TIP_MIN_COLS: usize = 8;
 
 /// The fitted process row: text at its widest affordable degradation level,
-/// and whether a Tip may still ride behind it (squeeze stage ②).
+/// and whether a Tip may still ride behind it.
 #[derive(Debug, Clone)]
 pub struct StatusFit {
     /// The status line to draw.
@@ -387,39 +259,20 @@ fn fits(text: &str, width: usize) -> bool {
     UnicodeWidthStr::width(text) <= width
 }
 
-/// Compose + squeeze the process row for `width` columns. The degradation
-/// ladder (design「窄/矮终端」): ① counts compact → ② Tip drops → ③ waiting
-/// trims (activity suffix → reassurance tail) → ④ hint shrinks to `^T` →
-/// the hint dies last; whatever still overflows hard-cuts from the tail
-/// (rank order — the weak tenants sit at the tail).
-pub fn fit_status(lead: &LeadPieces, seg: &TaskSegment, width: usize) -> StatusFit {
-    // Stage 0: everything wide (the string-table wording).
-    let wide = format!("{}{}", lead.full(), seg.blocks(false, Some(false)));
+/// Compose + squeeze the process row for `width` columns. The lead alone
+/// carries it now (Rev 2026-11-04 retired the task segment — tasks are rows,
+/// not a count strip). Ladder: full (Tip may ride) → Tip drops, then waiting
+/// trims (activity suffix → reassurance tail) → whatever still overflows
+/// hard-cuts from the tail (weak tenants sit at the tail).
+pub fn fit_lead(lead: &LeadPieces, width: usize) -> StatusFit {
+    let wide = lead.full();
     if tip_room(&wide, width) {
         return StatusFit {
             text: wide,
             tip_allowed: true,
         };
     }
-    // ① counts compact, full hint, tip room still reserved.
-    let compact = format!("{}{}", lead.full(), seg.blocks(true, Some(false)));
-    if tip_room(&compact, width) {
-        return StatusFit {
-            text: compact,
-            tip_allowed: true,
-        };
-    }
-    // ② the Tip is gone; the status may spend the whole width. ③ trims the
-    // waiting lead (activity → reassurance tail), ④ shrinks the hint, and
-    // the hint's complete disappearance is the last named sacrifice.
-    let candidates = [
-        compact.clone(),
-        format!("{}{}", lead.no_activity(), seg.blocks(true, Some(false))),
-        format!("{}{}", lead.min(), seg.blocks(true, Some(false))),
-        format!("{}{}", lead.min(), seg.blocks(true, Some(true))),
-        format!("{}{}", lead.min(), seg.blocks(true, None)),
-    ];
-    for text in candidates {
+    for text in [lead.full(), lead.no_activity(), lead.min()] {
         if fits(&text, width) {
             return StatusFit {
                 text,
@@ -427,23 +280,37 @@ pub fn fit_status(lead: &LeadPieces, seg: &TaskSegment, width: usize) -> StatusF
             };
         }
     }
-    // Beyond the ladder: hard-cut the tail (weak tenants sit at the tail).
-    let last = format!("{}{}", lead.min(), seg.blocks(true, None));
     StatusFit {
-        text: elide(&last, width, Elide::Head),
+        text: elide(&lead.min(), width, Elide::Head),
         tip_allowed: false,
     }
 }
 
-/// Wide form — the exact string-table wording, for `status_line()` and tests.
-pub fn compose_status(lead: &LeadPieces, seg: &TaskSegment) -> String {
-    format!("{}{}", lead.full(), seg.blocks(false, Some(false)))
+/// The frame's title (string table, design mock `Tasks (n)`): the live row
+/// count plus the unacked-failure badge (`· k new`, D10). Lives here with the
+/// rest of the string table — the `·` is a deliberate design glyph (CJK-
+/// ambiguous width; every consumer measures with display columns).
+pub fn panel_title(total: usize, unacked_failures: usize) -> String {
+    if unacked_failures > 0 {
+        format!("Tasks ({total}) · {unacked_failures} new")
+    } else {
+        format!("Tasks ({total})")
+    }
 }
+
+/// The frame's key hint — one of only two places `^T` is ever spelled (the
+/// other is the live face's overflow line). Not a standing hint: it lives in
+/// the frame chrome, next to the thing it opens.
+pub const FRAME_CLOSE_HINT: &str = "^T close";
 
 /// Content rows inside the task frame at full size (6 + 2 borders = 8).
 pub const FRAME_CONTENT_ROWS: usize = 6;
 /// One content row is the floor before the frame is suppressed outright.
 pub const FRAME_MIN_CONTENT: usize = 1;
+
+/// Hard row cap of the frameless live face (Rev 2026-11-04: hard 6-row cap 限高 6 行硬).
+/// Same budget as the frame's content rows — one row region, two modes.
+pub const LIVE_FACE_ROWS: usize = FRAME_CONTENT_ROWS;
 
 /// Panel height in terminal rows for `rows` live rows with `avail` rows to
 /// spare: `min(rows, 6) + 2` (content + borders), content shrinking 6→1 on
@@ -462,20 +329,25 @@ pub fn frame_height(rows: usize, avail: u16) -> u16 {
     }
 }
 
-/// Keep the selection (or the S1 anchor) visible in a `view_rows` window over
-/// `total` rows with minimal movement; with neither, anchor the tail (new
-/// work lands there — design detail 3). Always clamped to a legal offset.
-pub fn window_offset(
-    offset: usize,
-    sel: Option<usize>,
-    anchor: Option<usize>,
-    total: usize,
-    view_rows: usize,
-) -> usize {
+/// Frameless live-face height for `shown` rows already trimmed to the cap,
+/// with `overflow` riding under them when rows were trimmed away. Shrinks on
+/// short terminals like the frame does; suppressed (0) below one row.
+pub fn live_face_height(shown: usize, overflow: bool, avail: u16) -> u16 {
+    let want = shown.min(LIVE_FACE_ROWS) as u16 + u16::from(overflow);
+    if want <= avail {
+        return want;
+    }
+    if avail >= 1 { avail } else { 0 }
+}
+
+/// Keep the selection visible in a `view_rows` window over `total` rows with
+/// minimal movement; with no selection, anchor the tail (new work lands
+/// there — design detail 3). Always clamped to a legal offset.
+pub fn window_offset(offset: usize, sel: Option<usize>, total: usize, view_rows: usize) -> usize {
     let view = view_rows.max(1);
     let max_off = total.saturating_sub(view);
     let mut off = offset.min(max_off);
-    match sel.or(anchor).filter(|t| *t < total) {
+    match sel.filter(|t| *t < total) {
         Some(t) => {
             if t < off {
                 off = t;
@@ -511,6 +383,51 @@ pub fn column_widths(inner_w: usize, name_wanted: usize) -> (usize, usize, usize
         act_w = 0;
     }
     (name_w, files_w, act_w)
+}
+
+/// Frameless live-face widths `(name, activity)` — the box's columns with the
+/// files column stripped (Rev 2026-11-04: the row render reuses the frame's row render 剥列).
+pub fn live_row_widths(inner_w: usize, name_wanted: usize) -> (usize, usize) {
+    const NAME_MIN: usize = 12;
+    const NAME_MAX: usize = 16;
+
+    let mut name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
+    let mut act_w = inner_w.saturating_sub(name_w);
+    if name_w > inner_w {
+        name_w = inner_w;
+        act_w = 0;
+    }
+    (name_w, act_w)
+}
+
+/// The live face's overflow line (Rev 2026-11-04 mock `+ 3 more · + 2 done ·
+/// ^T tasks`): hidden-row counts after the 6-row trim, then the only key
+/// hint outside the frame. Parts degrade away as width tightens — the hint
+/// first (weakest tenant, it is discoverability, not data), then the done
+/// count. `None` when nothing is hidden (the line exists for overflow only).
+pub fn overflow_line(hidden_more: usize, hidden_done: usize, width: usize) -> Option<String> {
+    if hidden_more == 0 && hidden_done == 0 {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if hidden_more > 0 {
+        parts.push(format!("+ {hidden_more} more"));
+    }
+    if hidden_done > 0 {
+        parts.push(format!("+ {hidden_done} done"));
+    }
+    parts.push("^T tasks".to_string());
+    // Degrade by dropping tail parts — the hint first (weakest tenant), then
+    // the done count; the `more` count is the strongest data.
+    for keep in (1..=parts.len()).rev() {
+        let line = parts[..keep].join(" · ");
+        if fits(&line, width) {
+            return Some(line);
+        }
+    }
+    // Physics: whatever data remains, hard-cut from the tail.
+    let data = parts[..parts.len() - 1].join(" · ");
+    Some(elide(&data, width, Elide::Head))
 }
 
 /// The files cell: `1 file` / `2 files` (mockup form; a count, not a list —

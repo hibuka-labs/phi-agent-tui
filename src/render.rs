@@ -10,17 +10,16 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
-use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AgentStatus, App, CONTEXT_MENU_H, CONTEXT_MENU_W, FocusTarget, ResultTier, SubAgentStatus,
-    context_menu_pos, fmt_k, is_writing_hint,
+    AgentStatus, App, CONTEXT_MENU_H, CONTEXT_MENU_W, FocusTarget, Phase, ResultTier,
+    context_menu_pos, fmt_k,
 };
 use crate::task_layout::{self, RowTint, format_time};
 use crate::task_panel::{TaskRow, ThinkingPanelState};
+use crate::task_view::{ActivityKind, TaskRowView, live_face_split};
 use crate::theme::{ShellToken, SpanSpec, Theme};
-use phi_kernel_tools::background_shell::BackgroundTaskStatus;
 use phi_tui::completer::{MentionCompleter, SlashCompleter};
 use phi_tui::layout::{Preview, folded_body, opens_block};
 use phi_tui::lines::{LineKind, ToolState};
@@ -78,18 +77,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1), // gap: transcript content never crowds the process row
         Constraint::Length(1), // process status line (status + tip, Claude Code style)
     ];
-    // Task frame (Ctrl+T): content rows + 2 borders, capped at 6+2 (design
-    // detail 3), shrunk on short terminals, suppressed below one content row
-    // — the status line always survives (矮终端).
-    let task_frame_h = if frame_open {
+    // Task face (Rev 2026-11-04): one row region, two modes — the framed
+    // panel when open, else the frameless live face (the count strip and its
+    // standing hint are retired). Both cap at 6 rows and shrink on short
+    // terminals; below one row the region is suppressed — the status line
+    // always survives (矮终端).
+    let task_region_h = {
         let fixed = 1 + 1 + queued_rows.len() as u16 + composer_height + 1;
         let avail = f.area().height.saturating_sub(fixed + 3); // Min(3) output floor
-        task_layout::frame_height(app.task_row_count(), avail)
-    } else {
-        0
+        if frame_open {
+            task_layout::frame_height(app.task_row_count(), avail)
+        } else if app.should_show_task_panel() {
+            let (shown, hidden_more, hidden_done) = live_face_split(&app.task_row_views());
+            task_layout::live_face_height(shown.len(), hidden_more + hidden_done > 0, avail)
+        } else {
+            0
+        }
     };
-    if task_frame_h > 0 {
-        constraints.push(Constraint::Length(task_frame_h)); // task frame
+    if task_region_h > 0 {
+        constraints.push(Constraint::Length(task_region_h)); // task face
     }
     if !queued_rows.is_empty() {
         constraints.push(Constraint::Length(queued_rows.len() as u16)); // queued strip
@@ -115,8 +121,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     idx += 2; // skip the gap above the process row
     render_process_line(f, app, chunks[idx]);
     idx += 1;
-    if task_frame_h > 0 {
-        render_task_panel(f, app, chunks[idx]);
+    if task_region_h > 0 {
+        render_task_face(f, app, chunks[idx]);
         idx += 1;
     }
     if !queued_rows.is_empty() {
@@ -151,8 +157,9 @@ fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
     // Choose which transcript to display based on focus: a sub-agent row
     // shows its transcript, a background row shows that task's live output
     // tail (the inspection view), anything else the root transcript.
+    // Rows land by id (Rev 2026-11-04) — indices shift when rows hide.
     let focused_row: Option<TaskRow> = match &app.task_panel.focus {
-        FocusTarget::TaskList(index) => app.task_rows().get(*index).cloned(),
+        FocusTarget::TaskList(id) => app.task_rows().into_iter().find(|r| r.id() == id.as_str()),
         FocusTarget::Input => None,
     };
     if let Some(TaskRow::Background(task_id)) = &focused_row {
@@ -793,10 +800,18 @@ fn render_process_line(f: &mut Frame, app: &App, area: Rect) {
     // The squeeze ladder (task_layout::fit_status) decides how much text
     // survives at this width and whether the Tip still has room behind it.
     let fit = app.status_fit(width);
+    // The busy band rides the brand warm channel — the same family as the
+    // `auto mode on` badge at the bottom band (dogfood 20261104: hardcoded
+    // Cyan/Yellow fought the badge). Waiting vs executing lives in the lead
+    // text; the one blocking ask (approval) earns the palette's red.
     let style = match app.status {
         AgentStatus::Idle => Style::default().fg(theme.hint),
-        AgentStatus::Waiting { .. } => Style::default().fg(Color::Cyan),
-        AgentStatus::Running { .. } => Style::default().fg(Color::Yellow),
+        AgentStatus::Running {
+            phase: Phase::AwaitingApproval,
+        } => Style::default().fg(theme.error),
+        AgentStatus::Waiting { .. } | AgentStatus::Running { .. } => {
+            Style::default().fg(theme.warm)
+        }
     };
     let mut spans = vec![Span::styled(fit.text, style)];
     // The tip follows the status after a tab-wide gap so it never crowds or
@@ -900,25 +915,174 @@ fn status_bar_right(app: &App) -> Option<(String, Style)> {
     Some(((app.copy.scroll_hint)(range.start + 1, total), green))
 }
 
-/// Render the task frame: three columns `[sel][glyph][name] │ [files] │
+/// Render the task face: one row region, two modes (Rev 2026-11-04). The
+/// framed panel when open, else the frameless live face — both draw from the
+/// same row views; the live face is the box's row rendering with the files
+/// column stripped (column strip 剥列).
+fn render_task_face(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.task_panel.frame_open {
+        render_frame_face(f, app, area);
+    } else {
+        render_live_face(f, app, area);
+    }
+}
+
+/// The frameless live face: display rows hard-capped at 6 (corpses trimmed
+/// first, then the running tail — [`live_face_split`]) with the overflow
+/// line under them. No borders, no selection marker: when this face is up,
+/// the focus is at the composer (框跟着事走 — the frame follows the work).
+fn render_live_face(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
+    let views = app.task_row_views();
+    let (shown, hidden_more, hidden_done) = live_face_split(&views);
+    let inner_w = area.width as usize;
+
+    // name 12–16 + flex activity; the files column is stripped.
+    const CHROME: usize = 3; // glyph+" ", one gap
+    let name_wanted = views
+        .iter()
+        .map(|v| UnicodeWidthStr::width(v.name.as_str()))
+        .max()
+        .unwrap_or(0);
+    let (name_w, act_w) = task_layout::live_row_widths(inner_w.saturating_sub(CHROME), name_wanted);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(shown.len() + 1);
+    for v in &shown {
+        lines.push(task_row_line(v, name_w, None, act_w, &theme));
+    }
+    if let Some(overflow) = task_layout::overflow_line(hidden_more, hidden_done, inner_w) {
+        lines.push(Line::from(Span::styled(
+            overflow,
+            Style::default().fg(theme.hint),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// One row's spans — shared by both faces (the live face passes
+/// `files_w: None`, which drops the files column and both `│` separators).
+/// Every cell is elided to its column then padded OUT to it, in display
+/// columns: `format!("{:<w$}")` pads by chars and would overshoot. A corpse
+/// dims; a failure remnant rides its tint (the strongest fact on the row);
+/// the pinned row takes the selection background.
+fn task_row_line(
+    v: &TaskRowView,
+    name_w: usize,
+    files_w: Option<usize>,
+    act_w: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let bg = if v.selected {
+        theme.selection_bg
+    } else {
+        Color::Reset
+    };
+    // Dim text must survive sitting on the selection background.
+    let faint = if v.selected {
+        theme.lifted
+    } else {
+        theme.faint
+    };
+    let dim = v.corpse && !v.remnant;
+    let tint = tint_color(v.tint);
+    let glyph_color = if dim { faint } else { tint };
+    let name_color = if dim {
+        faint
+    } else if v.remnant {
+        tint
+    } else {
+        Color::Reset
+    };
+    let act_color = if dim {
+        faint
+    } else {
+        match v.activity_kind {
+            ActivityKind::LiveTool => Color::Reset,
+            ActivityKind::LiveToolDone | ActivityKind::Writing => faint,
+            ActivityKind::Verdict => match v.tint {
+                RowTint::Error => Color::Red,
+                RowTint::Warn => Color::Yellow,
+                _ => faint,
+            },
+        }
+    };
+    let act_mode = if v.activity_tail_elide {
+        Elide::Tail { sep: None }
+    } else {
+        Elide::Head
+    };
+
+    let mut spans = Vec::with_capacity(5);
+    spans.push(Span::styled(
+        if v.selected { "> " } else { "  " }.to_string(),
+        Style::default().bg(bg),
+    ));
+    spans.push(Span::styled(
+        format!("{} ", v.glyph),
+        Style::default().fg(glyph_color).bg(bg),
+    ));
+    spans.push(Span::styled(
+        task_layout::cell(&v.name, name_w, Elide::Head),
+        Style::default().fg(name_color).bg(bg),
+    ));
+    if let Some(files_w) = files_w {
+        spans.push(Span::styled(
+            format!("│ {}", task_layout::cell(&v.files, files_w, Elide::Head)),
+            Style::default().fg(faint).bg(bg),
+        ));
+        spans.push(Span::styled(
+            format!("│ {}", task_layout::cell(&v.activity, act_w, act_mode)),
+            Style::default().fg(act_color).bg(bg),
+        ));
+    } else {
+        // Live face: no separators — one gap after the padded name column.
+        spans.push(Span::styled(" ".to_string(), Style::default().bg(bg)));
+        spans.push(Span::styled(
+            task_layout::cell(&v.activity, act_w, act_mode),
+            Style::default().fg(act_color).bg(bg),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Map a row tint to its color slot (the glyph table's partner — the
+/// accessibility triple-encoding: meaning never rides shape alone).
+fn tint_color(tint: RowTint) -> Color {
+    match tint {
+        RowTint::Running => Color::Cyan,
+        RowTint::Done => Color::Green,
+        RowTint::Error => Color::Red,
+        RowTint::Warn => Color::Yellow,
+    }
+}
+
+/// The framed panel: three columns `[sel][glyph][name] │ [files] │
 /// [activity]` (design mock; the time column is gone — done rows carry
 /// `done 2m13s` in their activity cell), squeezed right→left as the panel
 /// narrows (task_layout::column_widths). S1 draws dim borders and no cursor;
 /// S2 draws the `>` cursor on the selected row with normal borders. Rows are
 /// the design's 6-row scroll window (`window_offset`), spawn-stable.
-fn render_task_panel(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_frame_face(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
-    let rows = app.task_rows();
-    let total = rows.len();
+    let views = app.task_row_views();
+    let total = views.len();
     let in_s2 = matches!(app.task_panel.focus, FocusTarget::TaskList(_));
 
-    // Title: all live rows, plus the unacked-failure badge (cleared on S2
-    // entry — D10). The wording lives with the string table.
-    let title = task_layout::panel_title(total, app.task_panel.unacked_failures);
+    // Title: the live row count plus the unacked-failure badge (cleared on
+    // S2 entry — D10); the close hint rides the top border's right end (one
+    // of only two `^T` homes). The wording lives with the string table.
+    let title = task_layout::panel_title(total, app.task_panel.unacked_failures.len());
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(title);
+        .title(title)
+        .title(
+            Line::from(Span::styled(
+                task_layout::FRAME_CLOSE_HINT,
+                Style::default().fg(theme.hint),
+            ))
+            .right_aligned(),
+        );
     if !in_s2 {
         // S1: visible but nothing selected — the frame dims (theme.hint).
         block = block.border_style(Style::default().fg(theme.hint));
@@ -927,7 +1091,8 @@ fn render_task_panel(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(block, area);
 
     if total == 0 {
-        // Live-key empty state: Ctrl+T with nothing tracked yet.
+        // Safety net: the toggle never opens an empty frame (框跟着事走 — the frame follows the work),
+        // but a frame whose rows all left under it says so here.
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "No sub-tasks yet",
@@ -954,175 +1119,22 @@ fn render_task_panel(f: &mut Frame, app: &mut App, area: Rect) {
     const CHROME: usize = 8; // marker+" ", glyph+" ", two "│ "
     let inner_w = inner.width as usize;
     let cols_budget = inner_w.saturating_sub(CHROME);
-    let name_wanted = rows
+    let name_wanted = views
         .iter()
-        .map(|row| match row {
-            TaskRow::SubAgent(id) => app
-                .sub_agents
-                .get(id)
-                .map_or(0, |s| UnicodeWidthStr::width(s.name.as_str())),
-            TaskRow::Background(id) => app
-                .background_tasks
-                .get(id)
-                .map_or(0, |t| UnicodeWidthStr::width(t.command.as_str())),
-        })
+        .map(|v| UnicodeWidthStr::width(v.name.as_str()))
         .max()
         .unwrap_or(0);
     let (name_w, files_w, act_w) = task_layout::column_widths(cols_budget, name_wanted);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(end - off);
-    for (i, row) in rows.iter().enumerate().take(end).skip(off) {
-        let is_selected = matches!(&app.task_panel.focus, FocusTarget::TaskList(idx) if *idx == i);
-        let marker = if is_selected { ">" } else { " " };
-        let bg_color = if is_selected {
-            theme.selection_bg
-        } else {
-            Color::Reset
-        };
-
-        let (glyph, glyph_color, name_text, files_text, act_text, act_mode, act_color) = match row {
-            TaskRow::SubAgent(agent_id) => {
-                let Some(state) = app.sub_agents.get(agent_id) else {
-                    continue;
-                };
-                // Glyph table (shape) + tint (color) + activity text — the
-                // accessibility triple-encoding: meaning never rides shape alone.
-                let (glyph, tint) = task_layout::status_glyph(&state.status);
-                let glyph_color = match tint {
-                    RowTint::Running => Color::Cyan,
-                    RowTint::Done => Color::Green,
-                    RowTint::Error => Color::Red,
-                    RowTint::Warn => Color::Yellow,
-                };
-                let elapsed = match state.completed_at {
-                    Some(at) => at.duration_since(state.started_at),
-                    None => state.started_at.elapsed(),
-                };
-                // Activity column: the live tool feed while running
-                // (`> tool` / `+ tool` / `writing...`), the verdict text once
-                // terminal (`done 2m13s` / `FAILED (...)` / `cancelled`).
-                let (act_text, act_mode, act_color) =
-                    if matches!(state.status, SubAgentStatus::Running) {
-                        if is_writing_hint(state, Instant::now()) {
-                            ("writing...".to_string(), Elide::Head, theme.faint)
-                        } else {
-                            let live = state
-                                .events
-                                .last()
-                                .map(|e| {
-                                    let mark = if e.is_finished { "+" } else { ">" };
-                                    (format!("{mark} {}", e.tool_name), e.is_finished)
-                                })
-                                .unwrap_or((String::new(), true));
-                            let color = if live.1 { theme.faint } else { Color::Reset };
-                            (live.0, Elide::Head, color)
-                        }
-                    } else {
-                        // A FAILED summary keeps its tail — the reason lives there.
-                        let mode = if matches!(state.status, SubAgentStatus::Failed { .. }) {
-                            Elide::Tail { sep: None }
-                        } else {
-                            Elide::Head
-                        };
-                        let color = match tint {
-                            RowTint::Error => Color::Red,
-                            RowTint::Warn => Color::Yellow,
-                            _ => theme.faint,
-                        };
-                        (
-                            task_layout::activity_cell(&state.status, elapsed),
-                            mode,
-                            color,
-                        )
-                    };
-                (
-                    glyph,
-                    glyph_color,
-                    state.name.clone(),
-                    task_layout::files_cell(state.files.len()),
-                    act_text,
-                    act_mode,
-                    act_color,
-                )
-            }
-            TaskRow::Background(task_id) => {
-                let Some(task) = app.background_tasks.get(task_id) else {
-                    continue;
-                };
-                let (glyph, glyph_color) = bg_status_glyph(&task.status);
-                // Deadline column: the fuse for bounded jobs, `daemon` for
-                // servers that run until they die.
-                let fuse = if task.is_indefinite() {
-                    "daemon".to_string()
-                } else {
-                    format!("t={}", format_time(Duration::from_millis(task.timeout_ms)))
-                };
-                let act_color = if task.status == BackgroundTaskStatus::Running {
-                    Color::Reset
-                } else {
-                    theme.faint
-                };
-                (
-                    glyph,
-                    glyph_color,
-                    task.command.clone(),
-                    fuse,
-                    bg_status_word(&task.status).to_string(),
-                    Elide::Head,
-                    act_color,
-                )
-            }
-        };
-
-        // Every cell is elided to its column then padded OUT to it, in display
-        // columns: `format!("{:<w$}")` pads by chars and would overshoot.
-        let spans = vec![
-            Span::styled(format!("{marker} "), Style::default().bg(bg_color)),
-            Span::styled(
-                format!("{glyph} "),
-                Style::default().fg(glyph_color).bg(bg_color),
-            ),
-            Span::styled(
-                task_layout::cell(&name_text, name_w, Elide::Head),
-                Style::default().bg(bg_color),
-            ),
-            Span::styled(
-                format!("│ {}", task_layout::cell(&files_text, files_w, Elide::Head)),
-                Style::default().fg(theme.faint).bg(bg_color),
-            ),
-            Span::styled(
-                format!("│ {}", task_layout::cell(&act_text, act_w, act_mode)),
-                Style::default().fg(act_color).bg(bg_color),
-            ),
-        ];
-        lines.push(Line::from(spans));
-    }
-
+    // The frame's window over the display set; `view_rows` is recorded so
+    // page steps match what fit. Row rendering is shared with the live face.
+    let lines: Vec<Line> = views
+        .iter()
+        .take(end)
+        .skip(off)
+        .map(|v| task_row_line(v, name_w, Some(files_w), act_w, &theme))
+        .collect();
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Status glyph + color for a background task row (shared by the panel row
-/// and the tail-view title). Shape reads the same as sub-agent rows:
-/// `*` running, `+` finished clean, `!` failed/timed out.
-fn bg_status_glyph(status: &BackgroundTaskStatus) -> (&'static str, Color) {
-    match status {
-        BackgroundTaskStatus::Running => ("*", Color::Cyan),
-        BackgroundTaskStatus::Done => ("+", Color::Green),
-        BackgroundTaskStatus::TimedOut => ("!", Color::Yellow),
-        BackgroundTaskStatus::Cancelled => ("-", Color::Yellow),
-        BackgroundTaskStatus::Error(_) => ("!", Color::Red),
-    }
-}
-
-/// One-word status for the activity column / tail title.
-fn bg_status_word(status: &BackgroundTaskStatus) -> &'static str {
-    match status {
-        BackgroundTaskStatus::Running => "running",
-        BackgroundTaskStatus::Done => "done",
-        BackgroundTaskStatus::TimedOut => "timeout",
-        BackgroundTaskStatus::Cancelled => "cancelled",
-        BackgroundTaskStatus::Error(_) => "error",
-    }
 }
 
 /// Inspection view for a focused background task row: the task's live output
@@ -1134,7 +1146,8 @@ fn render_bg_tail(f: &mut Frame, app: &App, area: Rect, task_id: &str) {
     let Some(entry) = app.background_tasks.get(task_id) else {
         return;
     };
-    let (glyph, color) = bg_status_glyph(&entry.status);
+    let (glyph, tint) = task_layout::bg_glyph(&entry.status);
+    let color = tint_color(tint);
     let elapsed = match entry.finished_at {
         Some(at) => at.duration_since(entry.started_at),
         None => entry.started_at.elapsed(),
@@ -1156,7 +1169,7 @@ fn render_bg_tail(f: &mut Frame, app: &App, area: Rect, task_id: &str) {
             dim,
         ),
         Span::styled(
-            format!(" - {}", bg_status_word(&entry.status)),
+            format!(" - {}", task_layout::bg_status_word(&entry.status)),
             Style::default().fg(color),
         ),
         Span::styled(format!(" - {}", format_time(elapsed)), dim),

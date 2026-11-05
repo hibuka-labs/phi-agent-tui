@@ -525,10 +525,6 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
             // copy.
             let fresh = drop_already_shown(&archived, messages);
             replay_messages_to_transcript(&mut app, &archived, fresh);
-            // Rows are runtime-only (the frame restarts at S0/empty), but the
-            // permanent ledger markers rode the replay — rebuild the session-
-            // cumulative counts from them (对账式: ✓+✗+— = terminal markers).
-            app.recount_task_ledger();
             if !messages.is_empty() || !archived.is_empty() {
                 // Digest goes AFTER the replay block: the viewport follows the
                 // bottom, so this lands on the visible last screen — right
@@ -822,8 +818,10 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                 dirty |= out.dirty;
             }
 
-            // Cleanup completed sub-agents (auto-remove after 3 seconds)
-            if app.cleanup_completed_agents() {
+            // Death-sweep backstop (Rev 2026-11-04): rows go at the design's
+            // death points; the tick covers any path that changed row state
+            // without passing an event handler.
+            if app.auto_sweep() {
                 dirty = true;
             }
 

@@ -987,14 +987,9 @@ impl App {
             self.pending_cancel = false;
             self.status = AgentStatus::Idle;
             self.activity_since = None;
-            // 框开 = 冻结回收 (F8): the user is looking at these rows — the
-            // age-based reaper sweeps them when the frame closes instead.
-            if !self.task_panel.frame_open {
-                self.sub_agents.clear();
-                self.sub_agent_transcripts.clear();
-                self.child_streams.clear();
-                self.thinking_since.clear();
-            }
+            // Turn-end sweep (Rev 2026-11-04, turn 收尾清场): corpses go at the root turn
+            // end — the pinned row is exempt and focus is never touched.
+            self.turn_end_sweep();
             false
         }
     }
@@ -1320,8 +1315,11 @@ impl App {
     }
 
     /// Paste text into the composer — or into the mention/slash prefix when a
-    /// picker is open (newlines are dropped from a path prefix).
+    /// picker is open (newlines are dropped from a path prefix). Pasting is
+    /// typing (Rev 2026-11-04, typing takeover 打字即接管): it hands the keyboard back to the
+    /// composer first, walking away from a pinned task row.
     pub fn paste(&mut self, text: &str) {
+        self.steal_focus_to_composer();
         if self.mention.is_some() {
             for c in text.chars() {
                 self.mention_push_char(c);
@@ -1384,10 +1382,6 @@ impl App {
     pub fn begin_user_turn(&mut self, text: &str) {
         self.push_user(text);
         self.transcript.clear_plan();
-        // F9: one turn = begin_user_turn → settle. The failure auto-expand
-        // re-arms, and a manual collapse outranks it for this turn again.
-        self.task_panel.popped_this_turn = false;
-        self.task_panel.user_collapsed_this_turn = false;
         // Follow the conversation: the user just committed to a turn, so the
         // reply must stream into view. If they were scrolled up reading
         // history, this is the moment their reading position ends.

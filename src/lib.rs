@@ -41,6 +41,7 @@ pub mod shell;
 pub mod task_focus;
 pub mod task_layout;
 pub mod task_panel;
+pub mod task_view;
 #[cfg(unix)]
 pub mod term_guard;
 pub mod theme;

@@ -1,14 +1,16 @@
-//! Design-verify tests for the three-state task-frame machine (20261103).
+//! Design-verify tests for the three-state task-frame machine (20261103,
+//! rows reworked Rev 2026-11-04).
 //!
-//! Covers the S0/S1/S2 transition table, the D10 landing rule, the failure
-//! auto-expand (F5/F9), the ledger counts' 对账 rule, and the reap TTLs.
+//! Covers the S0/S1/S2 transition table, selection by row id, the D10
+//! landing rule, ack-on-open, typing takeover (打字即接管) and the two death
+//! sweeps (all-complete / turn-end) with their exemptions.
 
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::{App, FocusTarget, SubAgentState, SubAgentStatus};
-use crate::task_layout::{LedgerMark, parse_ledger_marker, status_glyph};
+use crate::task_layout::status_glyph;
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -39,16 +41,21 @@ fn key(app: &mut App, code: KeyCode) {
     app.handle_key(code, KeyModifiers::NONE);
 }
 
-fn row_index(app: &App, id: &str) -> usize {
-    app.task_rows()
-        .iter()
-        .position(|r| matches!(r, crate::task_panel::TaskRow::SubAgent(p) if p == id))
-        .expect("row present")
+fn sel(app: &App) -> Option<String> {
+    app.task_panel.selected_id().map(str::to_string)
 }
 
-fn row_visible(app: &App, idx: usize) -> bool {
-    let off = app.task_panel.window_offset;
-    idx >= off && idx < off + app.task_panel.view_rows
+fn ids(app: &App) -> Vec<String> {
+    app.task_rows().iter().map(|r| r.id().to_string()).collect()
+}
+
+fn fail(app: &mut App, id: &str) {
+    app.mark_sub_agent_finished(
+        id,
+        SubAgentStatus::Failed {
+            summary: "boom".into(),
+        },
+    );
 }
 
 // ── S0/S1/S2 transition table (design detail 2) ─────────────────────────────
@@ -63,8 +70,8 @@ fn ctrl_t_toggles_s0_s2_and_lands_on_the_last_row() {
     ctrl_t(&mut app);
     assert!(app.task_panel.frame_open, "Ctrl+T opens the frame");
     assert_eq!(
-        app.task_panel.focus,
-        FocusTarget::TaskList(1),
+        sel(&app).as_deref(),
+        Some("root/b"),
         "S2 lands on the last row (no failures)"
     );
 
@@ -74,15 +81,13 @@ fn ctrl_t_toggles_s0_s2_and_lands_on_the_last_row() {
 }
 
 #[test]
-fn ctrl_t_on_an_empty_list_lands_s1_and_the_frame_says_so() {
+fn ctrl_t_on_an_empty_set_is_a_no_op() {
     let mut app = App::new();
-    // S0 空: no task history — the key is live and the frame explains itself.
+    // The frame follows the work 框跟着事走: no rows, no face — the key must not open an empty frame.
     ctrl_t(&mut app);
-    assert!(app.task_panel.frame_open);
-    assert_eq!(app.task_panel.focus, FocusTarget::Input, "S1 has no row");
-    let snap = crate::render::snapshot_text(&mut app, 60, 12);
-    assert!(snap.contains("Tasks (0)"), "got:\n{snap}");
-    assert!(snap.contains("No sub-tasks yet"), "got:\n{snap}");
+    assert!(!app.task_panel.frame_open);
+    assert_eq!(app.task_panel.focus, FocusTarget::Input);
+    assert!(!app.should_show_task_panel());
 }
 
 #[test]
@@ -93,7 +98,7 @@ fn up_opens_s2_and_down_past_the_full_list_drops_s1() {
     // ↑ at the composer (S0) opens the frame and enters the list.
     key(&mut app, KeyCode::Up);
     assert!(app.task_panel.frame_open);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(sel(&app).as_deref(), Some("root/a"));
 
     // ↓ past the FULL-list last row (not the window's) → S1.
     key(&mut app, KeyCode::Down);
@@ -102,7 +107,7 @@ fn up_opens_s2_and_down_past_the_full_list_drops_s1() {
 
     // ↑ re-enters S2 and re-lands per D10 (no failures → the last row).
     key(&mut app, KeyCode::Up);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(sel(&app).as_deref(), Some("root/a"));
 }
 
 #[test]
@@ -110,7 +115,7 @@ fn escape_drops_s2_to_s1_and_the_second_escape_falls_through() {
     let mut app = App::new();
     insert(&mut app, "root/a", "a", 1);
     ctrl_t(&mut app);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(sel(&app).as_deref(), Some("root/a"));
 
     // D8: the first Esc only deselects — the draft must survive untouched.
     assert!(app.task_list_escape(), "S2 consumes Esc");
@@ -133,191 +138,182 @@ fn home_end_and_page_move_the_selection() {
         );
     }
     ctrl_t(&mut app);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(9));
+    assert_eq!(sel(&app).as_deref(), Some("root/09"));
 
     key(&mut app, KeyCode::Home);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(0));
+    assert_eq!(sel(&app).as_deref(), Some("root/00"));
     key(&mut app, KeyCode::End);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(9));
+    assert_eq!(sel(&app).as_deref(), Some("root/09"));
 
     // PgUp/PgDn move by one window page (view_rows, default 6).
     key(&mut app, KeyCode::PageUp);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(3));
+    assert_eq!(sel(&app).as_deref(), Some("root/03"));
     key(&mut app, KeyCode::PageDown);
-    assert_eq!(app.task_panel.focus, FocusTarget::TaskList(9));
+    assert_eq!(sel(&app).as_deref(), Some("root/09"));
 }
 
-// ── failure auto-expand (design details 3/5, F5/F9/D10) ─────────────────────
+// ── D10 landing + ack-on-open ───────────────────────────────────────────────
 
 #[test]
-fn auto_expand_lands_s1_anchoring_the_failed_row_in_the_window() {
+fn d10_landing_prefers_the_first_unacked_failure() {
     let mut app = App::new();
-    for i in 0..20 {
-        insert(
-            &mut app,
-            &format!("root/{i:02}"),
-            &format!("n{i:02}"),
-            30 - i,
-        );
-    }
-    let failed_idx = row_index(&app, "root/15");
+    insert(&mut app, "root/a", "a", 3);
+    insert(&mut app, "root/b", "b", 2);
+    insert(&mut app, "root/c", "c", 1);
+    fail(&mut app, "root/b");
 
-    // First failure while collapsed pops the frame WITHOUT stealing focus.
-    app.mark_sub_agent_finished(
-        "root/15",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
-    assert!(app.task_panel.frame_open, "auto-expand fired");
-    assert_eq!(
-        app.task_panel.focus,
-        FocusTarget::Input,
-        "auto-expand lands S1 — the user is typing"
-    );
-    assert_eq!(app.task_panel.unacked_failures, 1);
+    key(&mut app, KeyCode::Up); // S0 → open + enter one step from the lesion
+    assert_eq!(sel(&app).as_deref(), Some("root/b"));
     assert!(
-        row_visible(&app, failed_idx),
-        "F5: the failed row must be inside the 6-row window (off={} rows={})",
-        app.task_panel.window_offset,
-        app.task_panel.view_rows
+        app.task_panel.unacked_failures.is_empty(),
+        "opening acks every outstanding failure (D10)"
     );
 }
 
 #[test]
-fn s2_entry_on_failure_lands_the_failed_row_and_clears_the_badge() {
+fn opening_clears_the_new_badge() {
+    let mut app = App::new();
+    insert(&mut app, "root/a", "a", 1);
+    fail(&mut app, "root/a");
+    assert_eq!(app.task_panel.unacked_failures.len(), 1);
+
+    ctrl_t(&mut app);
+    assert!(app.task_panel.unacked_failures.is_empty());
+    let snap = crate::render::snapshot_text(&mut app, 60, 12);
+    assert!(!snap.contains("1 new"), "badge clears on open: {snap}");
+    assert!(snap.contains("Tasks (1)"), "got:\n{snap}");
+}
+
+// ── typing takeover (Rev 2026-11-04) ────────────────────────────────────────
+
+#[test]
+fn typing_hands_the_keyboard_back_to_the_composer() {
+    let mut app = App::new();
+    insert(&mut app, "root/a", "a", 1);
+    ctrl_t(&mut app); // S2: pinned on root/a
+    assert!(sel(&app).is_some());
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE);
+    assert_eq!(app.task_panel.focus, FocusTarget::Input, "typing takeover");
+    assert_eq!(app.composer.text(), "h", "the key still types");
+
+    // The walked-away pin demotes to a corpse (pin-release — reversible against
+    // the design table's "the row does not change" reading: the root reply must be
+    // readable and a lingering pin would block the all-complete sweep).
+    assert!(app.task_panel.touched.contains("root/a"));
+
+    // Enter steals too: re-pin, then submit (empty) — focus ends at Input.
+    key(&mut app, KeyCode::Up);
+    assert!(sel(&app).is_some());
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.task_panel.focus, FocusTarget::Input);
+}
+
+// ── display set + death sweeps (Rev 2026-11-04) ────────────────────────────
+
+#[test]
+fn a_touchedless_terminal_row_hides_the_moment_it_lands() {
     let mut app = App::new();
     insert(&mut app, "root/a", "a", 2);
     insert(&mut app, "root/b", "b", 1);
-    app.mark_sub_agent_finished(
-        "root/a",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
-    assert_eq!(app.task_panel.unacked_failures, 1);
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
 
-    // D10: ↑ from S1 enters the list one step from the lesion.
-    key(&mut app, KeyCode::Up);
-    assert_eq!(
-        app.task_panel.focus,
-        FocusTarget::TaskList(row_index(&app, "root/a"))
-    );
-    assert_eq!(
-        app.task_panel.unacked_failures, 0,
-        "entering S2 acks the failures"
-    );
-
-    // And the title badge is gone with it.
-    app.task_panel.frame_open = true;
-    let snap = crate::render::snapshot_text(&mut app, 60, 12);
+    // Hide-on-complete 完成即隐: the row leaves the display set at the terminal …
+    assert_eq!(ids(&app), ["root/b"]);
+    // … but the store keeps it until a death sweep (late fan-in reports).
+    assert!(app.sub_agents.contains_key("root/a"));
+    app.turn_end_sweep();
     assert!(
-        !snap.contains("1 new"),
-        "badge must clear on S2 entry: {snap}"
+        !app.sub_agents.contains_key("root/a"),
+        "untouched terminal rows go at the sweep"
     );
 }
 
 #[test]
-fn manual_collapse_outranks_auto_expand_for_the_rest_of_the_turn() {
+fn auto_sweep_clears_the_face_when_everything_is_done() {
     let mut app = App::new();
     insert(&mut app, "root/a", "a", 1);
-
-    // Open then manually collapse: F9 — no bounce-back this turn.
-    ctrl_t(&mut app);
-    ctrl_t(&mut app);
-    assert!(!app.task_panel.frame_open);
-    app.mark_sub_agent_finished(
-        "root/a",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
+    ctrl_t(&mut app); // pin the row — a selection waits for the next death point
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
+    assert!(
+        app.sub_agents.contains_key("root/a"),
+        "the pinned row blocks the sweep even at all-complete"
     );
+    assert_eq!(
+        ids(&app),
+        ["root/a"],
+        "inspection freeze: the pinned row shows"
+    );
+
+    // Walk away: the pin demotes to a corpse and the sweep is now due.
+    assert!(app.task_list_escape());
+    assert!(!app.sub_agents.contains_key("root/a"), "all-complete sweep");
     assert!(
         !app.task_panel.frame_open,
-        "manual collapse outranks the auto-expand"
+        "the frame follows the work: no rows, no face"
     );
-
-    // The next turn resets the budget.
-    app.begin_user_turn("next");
-    app.mark_sub_agent_finished(
-        "root/b",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
-    // (root/b has no row — finalize is a no-op — so arm via a real row.)
-    insert(&mut app, "root/c", "c", 1);
-    app.mark_sub_agent_finished(
-        "root/c",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
-    assert!(app.task_panel.frame_open, "new turn may auto-expand again");
+    assert_eq!(app.task_panel.focus, FocusTarget::Input);
 }
-
-// ── counts ledger (design detail 4, D9) ─────────────────────────────────────
 
 #[test]
-fn counts_reconcile_with_the_ledger_markers() {
+fn turn_end_sweep_removes_corpses_but_spares_the_pin_and_the_remnant() {
     let mut app = App::new();
-    insert(&mut app, "root/ok", "ok", 3);
-    insert(&mut app, "root/bad", "bad", 2);
-    insert(&mut app, "root/nope", "nope", 1);
-    app.mark_sub_agent_finished("root/ok", SubAgentStatus::Done);
-    app.mark_sub_agent_finished(
-        "root/bad",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
-    app.mark_sub_agent_finished("root/nope", SubAgentStatus::Cancelled);
+    insert(&mut app, "root/a", "a", 3);
+    insert(&mut app, "root/b", "b", 2);
+    insert(&mut app, "root/c", "c", 1);
+    ctrl_t(&mut app); // pins root/c (last row)
+    key(&mut app, KeyCode::Up); // root/b
+    key(&mut app, KeyCode::Up); // root/a — every row touched
+    key(&mut app, KeyCode::End); // back to root/c
 
-    let counts = &app.task_panel.counts;
-    assert_eq!(counts.done, 1);
-    assert_eq!(counts.failed, 1);
-    assert_eq!(counts.cancelled, 1, "cancel is its own yellow bucket (D9)");
+    app.mark_sub_agent_finished("root/a", SubAgentStatus::Done);
+    fail(&mut app, "root/b");
+    app.mark_sub_agent_finished("root/c", SubAgentStatus::Done);
 
-    // 对账: ✓ + ✗ + — = terminal marker count (started excluded), and each
-    // marker agrees with its bucket.
-    let marks: Vec<LedgerMark> = app
-        .transcript
-        .output
-        .iter()
-        .filter_map(|l| parse_ledger_marker(&l.text))
-        .collect();
-    assert_eq!(marks.len(), counts.total());
-    assert_eq!(
-        marks.iter().filter(|m| **m == LedgerMark::Done).count(),
-        counts.done
-    );
-    assert_eq!(
-        marks.iter().filter(|m| **m == LedgerMark::Failed).count(),
-        counts.failed
-    );
-    assert_eq!(
-        marks
-            .iter()
-            .filter(|m| **m == LedgerMark::Cancelled)
-            .count(),
-        counts.cancelled
-    );
+    assert_eq!(ids(&app), ["root/a", "root/b", "root/c"]);
+    app.turn_end_sweep();
+    // root/a was a swept corpse; the pin (root/c) and the unacked failure
+    // (root/b) survive — principle ① / the worst residue.
+    assert_eq!(ids(&app), ["root/b", "root/c"]);
+    assert!(!app.sub_agents.contains_key("root/a"));
+    assert!(app.sub_agents.contains_key("root/b"));
+    assert!(app.sub_agents.contains_key("root/c"));
+    assert!(app.task_panel.frame_open, "the face still has rows");
 }
+
+#[test]
+fn an_unacked_failure_remnant_lingers_until_seen() {
+    let mut app = App::new();
+    insert(&mut app, "root/a", "a", 1);
+    fail(&mut app, "root/a");
+
+    // No auto-expand (F5, retired): the remnant row on the live face is the
+    // alarm — and it outlives every sweep until the user comes to look.
+    assert!(!app.task_panel.frame_open);
+    assert_eq!(ids(&app), ["root/a"], "the remnant keeps its row");
+    app.turn_end_sweep();
+    assert!(
+        app.sub_agents.contains_key("root/a"),
+        "the worst residue is the red failure row"
+    );
+
+    // Coming to look (frame open) lands on it and acks it away.
+    ctrl_t(&mut app);
+    assert_eq!(sel(&app).as_deref(), Some("root/a"));
+    assert!(app.task_panel.unacked_failures.is_empty());
+}
+
+// ── three-way encoding (design detail 6) ────────────────────────────────────
 
 #[test]
 fn failure_and_cancel_encode_three_ways_each() {
     let mut app = App::new();
     insert(&mut app, "root/bad", "bad", 2);
     insert(&mut app, "root/nope", "nope", 1);
-    app.mark_sub_agent_finished(
-        "root/bad",
-        SubAgentStatus::Failed {
-            summary: "boom".into(),
-        },
-    );
+    fail(&mut app, "root/bad");
     app.mark_sub_agent_finished("root/nope", SubAgentStatus::Cancelled);
 
-    // Failure: red `!` row + `FAILED (…)` marker + the ✗ bucket.
+    // Failure: red `!` row + a `FAILED (…)` verdict and ledger marker.
     let (glyph, tint) = status_glyph(&SubAgentStatus::Failed {
         summary: "boom".into(),
     });
@@ -327,7 +323,7 @@ fn failure_and_cancel_encode_three_ways_each() {
         app.transcript
             .output
             .iter()
-            .any(|l| l.text.contains("FAILED (boom)")),
+            .any(|l| l.text == "* [root/bad] FAILED (boom)"),
         "transcript must record the failure: {:?}",
         app.transcript
             .output
@@ -336,7 +332,7 @@ fn failure_and_cancel_encode_three_ways_each() {
             .collect::<Vec<_>>()
     );
 
-    // Cancel: yellow `-` row + `CANCELLED` marker + the — bucket, never ✗.
+    // Cancel: yellow `-` row + a `CANCELLED` marker — never red (D9).
     let (glyph, tint) = status_glyph(&SubAgentStatus::Cancelled);
     assert_eq!(glyph, "-");
     assert_eq!(tint, crate::task_layout::RowTint::Warn);
@@ -344,74 +340,7 @@ fn failure_and_cancel_encode_three_ways_each() {
         app.transcript
             .output
             .iter()
-            .any(|l| l.text.contains("CANCELLED")),
+            .any(|l| l.text == "* [root/nope] CANCELLED"),
         "transcript must record the cancel"
     );
-    assert_eq!(app.task_panel.counts.failed, 1);
-    assert_eq!(app.task_panel.counts.cancelled, 1);
-}
-
-#[test]
-fn failed_rows_get_the_30s_review_window() {
-    let mut app = App::new();
-    let mut failed = running_agent("bad", 50);
-    failed.status = SubAgentStatus::Failed {
-        summary: "boom".into(),
-    };
-    failed.completed_at = Some(Instant::now() - Duration::from_secs(10));
-    app.sub_agents.insert("root/bad".to_string(), failed);
-
-    // 10s old: inside the 30s F8 window even though Done would be gone at 3s.
-    assert!(!app.cleanup_completed_agents());
-    assert!(app.sub_agents.contains_key("root/bad"));
-
-    app.sub_agents.get_mut("root/bad").unwrap().completed_at =
-        Some(Instant::now() - Duration::from_secs(35));
-    assert!(app.cleanup_completed_agents());
-    assert!(!app.sub_agents.contains_key("root/bad"));
-}
-
-// ── resume recount (design detail 4) ────────────────────────────────────────
-
-#[test]
-fn resume_recount_rebuilds_the_counts_from_transcript_markers() {
-    let mut app = App::new();
-    // A restarted session has no rows but the permanent markers replay.
-    app.transcript.push(phi_tui::lines::OutputLine {
-        text: "* [root/a] started".to_string(),
-        kind: phi_tui::lines::LineKind::Tool,
-        spans: None,
-        original: None,
-        detail: None,
-        tool_state: None,
-    });
-    app.transcript.push(phi_tui::lines::OutputLine {
-        text: "* [root/a] done (2m13s)".to_string(),
-        kind: phi_tui::lines::LineKind::Tool,
-        spans: None,
-        original: None,
-        detail: None,
-        tool_state: None,
-    });
-    app.transcript.push(phi_tui::lines::OutputLine {
-        text: "* [root/b] FAILED (exit 1)".to_string(),
-        kind: phi_tui::lines::LineKind::Tool,
-        spans: None,
-        original: None,
-        detail: None,
-        tool_state: None,
-    });
-    app.transcript.push(phi_tui::lines::OutputLine {
-        text: "* [root/c] CANCELLED".to_string(),
-        kind: phi_tui::lines::LineKind::Tool,
-        spans: None,
-        original: None,
-        detail: None,
-        tool_state: None,
-    });
-
-    app.recount_task_ledger();
-    let counts = &app.task_panel.counts;
-    assert_eq!((counts.done, counts.failed, counts.cancelled), (1, 1, 1));
-    assert_eq!(counts.total(), 3, "started is not a terminal marker");
 }
