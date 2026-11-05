@@ -44,7 +44,15 @@ use super::term_guard;
 
 /// A command from the TUI loop to the agent task.
 enum Cmd {
-    Run(String),
+    Run {
+        /// The turn's input text.
+        input: String,
+        /// Machine-composed input (background wake, child batch): the turn
+        /// runs the same, but the message is tagged synthetic so the rotation
+        /// trail never mistakes it for the user's own words. A click answer
+        /// is real user intent and stays `false`.
+        synthetic: bool,
+    },
     Quit,
 }
 
@@ -624,7 +632,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                 if !leftover.is_empty() {
                     let joined = leftover.join("\n");
                     app.begin_user_turn(&joined);
-                    if cmd_tx.send(Cmd::Run(joined)).is_ok() {
+                    if cmd_tx
+                        .send(Cmd::Run {
+                            input: joined,
+                            synthetic: false,
+                        })
+                        .is_ok()
+                    {
                         app.running = true;
                     } else {
                         // Channel closed — undo the commit (same rule as the
@@ -634,7 +648,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                 }
                 for cmd in held_cmds {
                     app.begin_user_turn(&cmd);
-                    if cmd_tx.send(Cmd::Run(cmd)).is_ok() {
+                    if cmd_tx
+                        .send(Cmd::Run {
+                            input: cmd,
+                            synthetic: false,
+                        })
+                        .is_ok()
+                    {
                         app.running = true;
                     } else {
                         app.settle_status_from_inflight();
@@ -709,7 +729,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                             // before the synthetic run starts.
                             app.mark_all_sub_agents_finished();
                             app.push_system(&notice);
-                            if cmd_tx.send(Cmd::Run(input)).is_ok() {
+                            if cmd_tx
+                                .send(Cmd::Run {
+                                    input,
+                                    synthetic: true,
+                                })
+                                .is_ok()
+                            {
                                 app.running = true;
                             }
                         }
@@ -727,7 +753,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                 tracing::info!("tui: flush_when_idle -> injecting batch");
                 app.mark_all_sub_agents_finished();
                 app.push_system(&notice);
-                if cmd_tx.send(Cmd::Run(input)).is_ok() {
+                if cmd_tx
+                    .send(Cmd::Run {
+                        input,
+                        synthetic: true,
+                    })
+                    .is_ok()
+                {
                     app.running = true;
                 }
                 dirty = true;
@@ -745,7 +777,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
             if let Some((notice, input)) = app.take_bg_wake(Instant::now()) {
                 tracing::info!("tui: bg_wake -> injecting background task report");
                 app.push_system(&notice);
-                if cmd_tx.send(Cmd::Run(input)).is_ok() {
+                if cmd_tx
+                    .send(Cmd::Run {
+                        input,
+                        synthetic: true,
+                    })
+                    .is_ok()
+                {
                     app.running = true;
                 }
                 dirty = true;
@@ -805,7 +843,16 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                     // lands here, and a click answer counts toward the title
                     // threshold (`Synthetic::user`).
                     app.begin_user_turn(&syn.text);
-                    if cmd_tx.send(Cmd::Run(syn.text)).is_ok() {
+                    // Provenance rides `Synthetic::user`: a click answer is
+                    // real user intent (trail-worthy); a generated report is
+                    // machine-composed (trail-synthetic).
+                    if cmd_tx
+                        .send(Cmd::Run {
+                            input: syn.text,
+                            synthetic: !syn.user,
+                        })
+                        .is_ok()
+                    {
                         app.running = true;
                         if syn.user {
                             user_msg_count += 1;
@@ -1034,7 +1081,13 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
                                     // so the echo/clock/phase can no longer
                                     // outlive a submit that never queued a run.
                                     app.begin_user_turn(&text);
-                                    if cmd_tx.send(Cmd::Run(text)).is_ok() {
+                                    if cmd_tx
+                                        .send(Cmd::Run {
+                                            input: text,
+                                            synthetic: false,
+                                        })
+                                        .is_ok()
+                                    {
                                         // Root turn queued. Synthetic turns set the
                                         // same flag at their send sites — `running`
                                         // means "a turn is in flight or queued", and
@@ -1756,14 +1809,19 @@ async fn agent_loop(
                 let _ = phi_telemetry::save_metrics(&metrics, &session_ctx.session_dir);
                 break;
             }
-            Cmd::Run(input) => {
+            Cmd::Run {
+                input,
+                synthetic: synthetic_run,
+            } => {
                 // Product command face (T5d): a `/name` submit is offered to
                 // the product's command table first — local semantics,
                 // settled via SystemMessage (no turn_number), never a model
                 // turn. Commands serialize on this loop, so the socket board
                 // sees one at a time; a plugin install blocks here until the
-                // human answers its full-facts confirm popup.
-                if let Some(spec) = commands.iter().find(|c| c.matches(&input)) {
+                // human answers its full-facts confirm popup. Synthetic input
+                // (machine-composed) is never offered: a child report that
+                // happens to start with "/" must not become a command.
+                if !synthetic_run && let Some(spec) = commands.iter().find(|c| c.matches(&input)) {
                     // T12: a panicking command action degrades to
                     // `ShellFlow::Unhandled` — the input falls through to skill
                     // routing and a plain turn, exactly like a declined
@@ -1803,6 +1861,9 @@ async fn agent_loop(
                 // records the raw input below.
                 let original_input = input.clone();
                 let routed = match &skills {
+                    // Synthetic input is always a plain turn: never skill
+                    // routing either (same reasoning as the command face).
+                    _ if synthetic_run => RouteOutcome::Turn { input },
                     Some(bridge) => {
                         // T12: a panicking router degrades to "plain turn" —
                         // the input goes to the model raw; traced.
@@ -1902,12 +1963,23 @@ async fn agent_loop(
                             .await
                     }
                     RouteOutcome::Turn { input: body } => {
-                        agent
-                            .run_turn(session.clone(), &body, move |ev| {
-                                turn_events_clone.lock().unwrap().push(ev);
-                                Ok(())
-                            })
-                            .await
+                        // Synthetic runs land here (routing is bypassed above)
+                        // and keep their tag through the engine entry.
+                        if synthetic_run {
+                            agent
+                                .run_turn_synthetic_input(session.clone(), &body, move |ev| {
+                                    turn_events_clone.lock().unwrap().push(ev);
+                                    Ok(())
+                                })
+                                .await
+                        } else {
+                            agent
+                                .run_turn(session.clone(), &body, move |ev| {
+                                    turn_events_clone.lock().unwrap().push(ev);
+                                    Ok(())
+                                })
+                                .await
+                        }
                     }
                 };
 
@@ -2181,7 +2253,7 @@ fn push_replayed_message(app: &mut super::app::App, msg: &ChatMessage) {
                 tool_state: None,
             });
         }
-        _ => {} // System / Custom — already filtered, skip.
+        _ => {} // System / Custom — machine context, not conversation; skip.
     }
 }
 
