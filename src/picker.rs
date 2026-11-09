@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::interaction::AskOption;
+use crate::interaction::{AskOption, PickRow};
 use crate::shell::{SessionIo, SessionRow};
 use crate::theme::Theme;
 use unicode_width::UnicodeWidthStr;
@@ -417,6 +417,45 @@ pub fn choice_footer(width: u16) -> &'static str {
         .unwrap_or(" Enter/Esc ")
 }
 
+// ── Product pick rows (the `/model` chooser) ────────────────────────────────
+
+/// One pick row: the cursor column, the label, and its note indented
+/// underneath — the same geometry as [`choice_lines`] so the popups share
+/// one layout. The extra face is `current`: the product's "this is the one
+/// in use" row stays bold even without the cursor on it.
+pub fn pick_lines(row: &PickRow, selected: bool, theme: Theme) -> Vec<Line<'static>> {
+    let cursor = if selected { "> " } else { "  " };
+    let label_style = if selected {
+        Style::default()
+            .bg(theme.selection_bg)
+            .fg(theme.selection_fg)
+            .add_modifier(Modifier::BOLD)
+    } else if row.current {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{cursor}{}", row.label),
+        label_style,
+    ))];
+    if let Some(note) = &row.note {
+        lines.push(Line::styled(
+            format!("    {note}"),
+            Style::default().fg(theme.faint),
+        ));
+    }
+    lines
+}
+
+/// How many rows the pick list takes: every label plus every note (same
+/// accounting as [`choice_list_height`]).
+pub fn pick_list_height(rows: &[PickRow]) -> u16 {
+    rows.iter()
+        .map(|row| if row.note.is_some() { 2 } else { 1 })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +650,60 @@ mod tests {
         assert_eq!(rows[0].label, "侧边栏");
         assert_eq!(rows[0].note.as_deref(), Some("筛选常驻"));
         assert_eq!(rows[1].note, None);
+    }
+
+    // ── product pick rows (the `/model` chooser) ──
+
+    fn pick(spec: &[(&str, Option<&str>, bool)]) -> Vec<PickRow> {
+        spec.iter()
+            .map(|(label, note, current)| PickRow {
+                id: (*label).to_string(),
+                label: (*label).to_string(),
+                note: note.map(|n| n.to_string()),
+                current: *current,
+            })
+            .collect()
+    }
+
+    /// protects: the product's "current" mark is readable without the cursor
+    /// on it. fails_when: a current row unselected renders plain. no_claim:
+    /// which row the product marks current.
+    #[test]
+    fn a_current_pick_row_stays_bold_without_the_cursor() {
+        let row = &pick(&[("m1", Some("current"), true), ("m2", None, false)])[0];
+        let styled = pick_lines(row, false, Theme::dark());
+        let line = &styled[0];
+        let span = &line.spans[0];
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "the current row must stay bold: {span:?}"
+        );
+        let plain = &pick(&[("m2", None, false)])[0];
+        let styled = pick_lines(plain, false, Theme::dark());
+        assert!(
+            !styled[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "a non-current row is plain"
+        );
+    }
+
+    /// protects: pick rows share the choice geometry (cursor column reserved,
+    /// note under the label). fails_when: the cursor column or note indent
+    /// drifts from `choice_lines`. no_claim: the note wording.
+    #[test]
+    fn pick_rows_reuse_the_choice_geometry() {
+        let rows = pick(&[("m1", Some("current"), true), ("m2", None, false)]);
+        let selected = pick_lines(&rows[0], true, Theme::dark());
+        let unselected = pick_lines(&rows[1], false, Theme::dark());
+        assert!(selected[0].to_string().starts_with("> "), "{selected:?}");
+        assert!(
+            unselected[0].to_string().starts_with("  "),
+            "{unselected:?}"
+        );
+        assert!(selected[1].to_string().contains("current"), "{selected:?}");
+        assert_eq!(pick_list_height(&rows), 3, "label + note + label");
+        assert_eq!(pick_list_height(&pick(&[("m", None, false)])), 1);
     }
 }

@@ -4,6 +4,8 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
 ### Added
 - **Two death sweeps for the task rows, with their exemptions** (Rev 2026-11-04).
   The all-complete sweep fires when nothing is running and no failure is
@@ -22,6 +24,24 @@ All notable changes to phi-agent-tui.
   re-render instead of an index that a dying row shifts. The frameless live
   face is capped at 6 rows and reuses the framed row render with the files
   column stripped.
+
+- **Character-level mouse selection.** Press and drag selects exactly the
+  characters under the pointer — not whole lines. The press snaps to the
+  first cell of the glyph (a wide CJK glyph selects whole, not half), a
+  double click takes the word, a triple click the block, and the right-click
+  menu copies the selection. Highlighting paints the selected cells, not the
+  whole row.
+- **A screenshot can be pasted into the composer** — the picture rides the
+  wire request as an image, behind a capability gate that asks the model
+  registry whether the live model can see it.
+- **Input history.** The composer keeps what was sent and brings it back with
+  the history keys, filtered to the current workspace.
+
+### Changed
+- **Breaking (dependency):** `phi-agent` 0.21.0, `phi-tui` 0.4.0,
+  `phi-kernel-tools` 0.13.0.
+- The app, the render pass and the run loop moved into directories
+  (`app/`, `render/`, `run/`); internal reorganization, no API change.
 
 ## [0.1.0] — 2026-11-02
 

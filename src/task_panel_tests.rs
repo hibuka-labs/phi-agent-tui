@@ -640,13 +640,13 @@ fn panel_columns_align_with_long_names() {
     app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
-    // Name column capped at 16 → the long name is ellipsized (13 chars + "...") instead of
-    // shoving the later columns out of alignment.
-    assert!(snap.contains("analyze-deeps..."), "got:\n{snap}");
+    // #13 任务列宽: the name column widened to 28, so this 25-column name now
+    // fits whole instead of being ellipsized at the old 16-column cap.
+    assert!(snap.contains("analyze-deepseek-harness"), "got:\n{snap}");
     // Both rows' column separators must sit at the same character position.
     let cols: Vec<usize> = snap
         .lines()
-        .filter(|l| l.contains("analyze-deeps...") || l.contains(" pi "))
+        .filter(|l| l.contains("analyze-deepseek-harness") || l.contains(" pi "))
         .filter_map(|l| l.find('│'))
         .collect();
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");
@@ -675,15 +675,16 @@ fn panel_columns_align_across_cjk_and_ascii_names() {
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
     // Both rows' `│` (the name/files separator) must sit on the same DISPLAY
     // column. Comparing char indices would hide the misalignment, so measure
-    // the width of the prefix before `│` instead.
-    // `│` #0 is the panel's own left border (which would make every row look
-    // aligned); `│` #1 is the first column separator inside the row.
+    // the display width of the prefix before the first `│`.
+    // #3 任务面板框只留上边框: the frame no longer draws a left border, so the
+    // first `│` in a row IS the name/files separator — there is no panel
+    // border to mistake for it.
     let cols: Vec<usize> = snap
         .lines()
         .filter(|l| l.contains("read_file"))
         .filter_map(|l| {
-            let cell = l.split('│').nth(1)?;
-            Some(1 + unicode_width::UnicodeWidthStr::width(cell))
+            let idx = l.find('│')?;
+            Some(unicode_width::UnicodeWidthStr::width(&l[..idx]))
         })
         .collect();
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");

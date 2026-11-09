@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::approval::{ApprovalItem, ApprovalModeSwitch};
 use crate::exit_dump::{ExitDumpMode, SessionFacts};
-use crate::interaction::AskItem;
+use crate::interaction::{AskItem, PickItem};
 use crate::tips::TipItem;
 
 pub use super::session_state::CurrentSession;
@@ -82,6 +82,14 @@ pub struct CommandSpec {
     pub in_picker: bool,
     /// The action: raw submit line → [`ShellFlow`].
     pub action: CommandAction,
+    /// Run this action the moment it is typed, even while a model turn is
+    /// streaming — the mid-turn lane. Set only for actions that answer
+    /// locally and park on their own modal (a model pick): they must never
+    /// fall through to a model turn (`ShellFlow::Unhandled` from a mid-turn
+    /// action degrades to a system line instead) and must not touch
+    /// transcript or turn state. Everything else keeps the classic lane:
+    /// queued behind the turn, one command at a time.
+    pub mid_turn: bool,
 }
 
 impl CommandSpec {
@@ -366,6 +374,18 @@ pub struct CopyTable {
     pub exit_dump_footer: CopyFacts,
     /// A session-skill bake failure, warned mid-turn: `(skill, error)`.
     pub skill_bake_failed: CopyPair,
+    /// Ask popup: the "Chat about this" pseudo-row at the option tail — the
+    /// third exit (type a question instead of picking).
+    pub ask_chat_row: String,
+    /// Its note line, shown under the label.
+    pub ask_chat_note: String,
+    /// Key legend of the clarify input face (the pseudo-row's Enter).
+    pub ask_clarify_footer: String,
+    /// Key legend of the product pick modal (the `/model` chooser).
+    pub pick_footer: String,
+    /// Hint under an empty pick list: the filter matched no row and Enter
+    /// takes the typed name verbatim.
+    pub pick_no_match: String,
     /// Approval/consent popups, risk line, mode badge and switch notice.
     pub approval: ApprovalCopy,
 }
@@ -381,6 +401,11 @@ impl std::fmt::Debug for CopyTable {
             .field("exit_dump_header", &"<formatter>")
             .field("exit_dump_footer", &"<formatter>")
             .field("skill_bake_failed", &"<formatter>")
+            .field("ask_chat_row", &self.ask_chat_row)
+            .field("ask_chat_note", &self.ask_chat_note)
+            .field("ask_clarify_footer", &self.ask_clarify_footer)
+            .field("pick_footer", &self.pick_footer)
+            .field("pick_no_match", &self.pick_no_match)
             .field("approval", &"<wording slots>")
             .finish()
     }
@@ -397,7 +422,9 @@ impl Default for CopyTable {
             }),
             mode_cycle_hint: "(shift+tab to cycle)".to_string(),
             thought_expand_hint: " (Ctrl+O expand)".to_string(),
-            scroll_hint: Arc::new(|start, total| format!("scroll {start}/{total} (End to bottom)")),
+            scroll_hint: Arc::new(|start, total| {
+                format!("scroll {start}/{total} (Ctrl+End to bottom)")
+            }),
             exit_dump_header: Arc::new(|facts| {
                 let turns = facts.turns;
                 format!(
@@ -418,6 +445,13 @@ impl Default for CopyTable {
             skill_bake_failed: Arc::new(|skill, error| {
                 format!("! skill `{skill}` could not be activated (prompt bake failed): {error}")
             }),
+            ask_chat_row: "Chat about this".to_string(),
+            ask_chat_note: "type a question instead of picking".to_string(),
+            // ASCII separator, not `·`: the CJK chrome guard bans the middot
+            // (double-width in CJK terminals, shifts the box borders).
+            ask_clarify_footer: " Enter send  Esc back ".to_string(),
+            pick_footer: " Enter set  Esc close ".to_string(),
+            pick_no_match: "no match - Enter uses the typed name".to_string(),
             approval: ApprovalCopy::default(),
         }
     }
@@ -505,6 +539,13 @@ pub type NoticeProbe = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 /// nothing would honor it. The classification and its wording are product
 /// policy (charter: no product policy in the shell); the shell only asks.
 pub type ConsentProbe = Arc<dyn Fn(&ApprovalRequest) -> bool + Send + Sync>;
+
+/// Vision capability of the current model: `Some(true)` = it sees pictures,
+/// `Some(false)` = it cannot (the paste pipeline says so and points at
+/// `/model`), `None` = unknown (paste proceeds and the engine's own budget /
+/// degradation rules judge the attachment). Product policy (the model
+/// registry knows what sees); the shell only asks.
+pub type VisionProbe = Arc<dyn Fn() -> Option<bool> + Send + Sync>;
 
 /// One session-list row for the picker — the display face only; how the
 /// product enumerates and scopes its sessions is its own policy, precomputed
@@ -697,6 +738,12 @@ pub struct ShellSpec {
     /// and lands under each session dir with these names; `None` = off.
     /// `Some(FrameLogPaths::default())` is phimint (the pre-sink default).
     pub paths: Option<FrameLogPaths>,
+    /// Composer input-history file (#7): `Some` = the product's JSONL path —
+    /// sent inputs are recalled with ↑/↓ across sessions, filtered to this
+    /// workspace; `None` = in-memory recall for the session only. The shell
+    /// only holds the path (charter): the layout under the product's data
+    /// dir stays product policy.
+    pub input_history: Option<PathBuf>,
     /// Workspace root (status bar, hit protocol, brand banner).
     pub workspace: PathBuf,
     /// Product name — status bar, LSP client info, path hints (identity
@@ -742,6 +789,10 @@ pub struct ShellSpec {
     /// Consent-gate classification ([`ConsentProbe`]). `None` = every approval
     /// prompt wears the tool (three-key) face and `a` means AllowAlways.
     pub is_consent: Option<ConsentProbe>,
+    /// Vision capability of the current model ([`VisionProbe`]). `None` =
+    /// unknown — a pasted picture rides along and the engine's own image
+    /// budget judges it.
+    pub vision: Option<VisionProbe>,
     /// Session persistence ([`SessionIo`]) — picker enumeration, the resume
     /// replay's archives, and the pre-switch heal. `None` = the product is
     /// not session-based (O6: 不填即关) — `/resume` then has no row and no
@@ -770,6 +821,10 @@ pub struct ShellHandles {
     pub bg_registry: Arc<BackgroundTaskRegistry>,
     /// Approval queue drained by the approval popup state machine.
     pub approval_rx: mpsc::UnboundedReceiver<ApprovalItem>,
+    /// The product pick modal's queue (product-pushed list pickers — the
+    /// `/model` chooser). Session-agnostic: the product owns one sender for
+    /// the whole run, so this is a handle, not a per-session boot queue.
+    pub pick_rx: mpsc::UnboundedReceiver<PickItem>,
     /// Approval mode switch (auto-approve etc.).
     pub approval_mode: Arc<ApprovalModeSwitch>,
     /// Log sinks; re-pointed at the resumed session's log file on switch.
@@ -790,6 +845,7 @@ mod tests {
             help: String::new(),
             in_picker: true,
             action: Arc::new(|_| Box::pin(std::future::ready(ShellFlow::Unhandled))),
+            mid_turn: false,
         }
     }
 

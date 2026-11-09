@@ -154,7 +154,7 @@ impl App {
 
     /// A sub-agent run reached a terminal state (watcher Progress/Batch,
     /// `RunCancelled`, lifecycle fact). Routes through
-    /// [`Self::finalize_sub_agent`]. Always refreshes the wait count, even for
+    /// `finalize_sub_agent`. Always refreshes the wait count, even for
     /// an unknown id — the refresh is itself a contract (callers can force one
     /// with a no-op id after touching the background table).
     pub fn mark_sub_agent_finished(&mut self, agent_path: &str, status: SubAgentStatus) {
@@ -784,6 +784,19 @@ impl App {
     /// share a "waiting for completion" promise.
     pub(crate) fn status_leads(&self) -> LeadPieces {
         let activity = self.activity_suffix();
+        // A pick modal is the front modal and owns input: the next step
+        // is a human choice, so the status must never claim the agent is
+        // thinking (Ctrl+C cancel) while the user is parked on the list.
+        // Approval and ask outrank pick (one modal at a time), so only
+        // report the pick when it really is the front surface.
+        if self.has_pending_pick() && !self.has_pending_ask() && !self.has_pending_approval() {
+            return LeadPieces {
+                head: "waiting for your pick".to_string(),
+                activity,
+                tail: format!(" ({})", self.copy.pick_footer.trim()),
+                tail_is_reassurance: true,
+            };
+        }
         let (head, tail) = match &self.status {
             AgentStatus::Idle => {
                 let base = if let Some(n) = &self.notice {

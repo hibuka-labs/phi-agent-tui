@@ -85,6 +85,16 @@ pub struct Theme {
     /// (`#ffb066`) on dark; Light keeps the hue but drops the red (`#e07a3c`)
     /// for white backgrounds.
     pub warm: Color,
+    /// Brand warm, light end: the live phase word on the process row
+    /// (`thinking...`). One step brighter than [`Theme::warm`] — the banner's
+    /// last gradient stop (`#ffc15e`). The phase word is the one live fact on
+    /// the row, so it takes the brand's brightest step; the parenthetical hint
+    /// beside it drops to [`Theme::hint`] (the line's layer split).
+    pub warm_bright: Color,
+    /// The ask/prompt box border — the warm-yellow family of the logo ramp
+    /// (`#ffb258`, the fifth dark-ramp stop). The only border in the warm
+    /// family: "answer this" is a brand affordance, not plain chrome (#4).
+    pub prompt_border: Color,
     /// Foregrounds that must read on any background — popup row names on light.
     pub strong: Color,
     /// Selection highlight background (transcript rows, task panel, menus).
@@ -113,6 +123,8 @@ impl Theme {
             thought: Color::Rgb(0x9e, 0x9e, 0x9e),
             user: Color::Rgb(0x5a, 0xa7, 0xf7),
             warm: Color::Rgb(0xff, 0xb0, 0x66),
+            warm_bright: Color::Rgb(0xff, 0xc1, 0x5e),
+            prompt_border: Color::Rgb(0xff, 0xb2, 0x58),
             strong: Color::White,
             selection_bg: Color::DarkGray,
             selection_fg: Color::White,
@@ -131,6 +143,8 @@ impl Theme {
             thought: Color::Rgb(0x6b, 0x6b, 0x6b),
             user: Color::Rgb(0x1a, 0x6f, 0xd4),
             warm: Color::Rgb(0xe0, 0x7a, 0x3c),
+            warm_bright: Color::Rgb(0xf0, 0x91, 0x3c),
+            prompt_border: Color::Rgb(0xdb, 0x7d, 0x29),
             strong: Color::Rgb(0x1a, 0x1a, 0x1a),
             selection_bg: Color::Rgb(0xc8, 0xc8, 0xc8),
             selection_fg: Color::Rgb(0x1a, 0x1a, 0x1a),
@@ -178,6 +192,8 @@ pub enum ShellToken {
     User,
     /// The warm badge accent — see [`Theme::warm`].
     Warm,
+    /// The brand's light warm step — see [`Theme::warm_bright`].
+    WarmBright,
     /// Must-read foregrounds — see [`Theme::strong`].
     Strong,
     /// Selection highlight background — see [`Theme::selection_bg`].
@@ -206,6 +222,7 @@ impl ShellToken {
             ShellToken::Thought => Style::default().fg(theme.thought),
             ShellToken::User => Style::default().fg(theme.user),
             ShellToken::Warm => Style::default().fg(theme.warm),
+            ShellToken::WarmBright => Style::default().fg(theme.warm_bright),
             ShellToken::Strong => Style::default().fg(theme.strong),
             ShellToken::SelectionBg => Style::default().fg(theme.selection_bg),
             ShellToken::SelectionFg => Style::default().fg(theme.selection_fg),
@@ -264,6 +281,8 @@ mod tests {
             ("thought", dark.thought, light.thought),
             ("user", dark.user, light.user),
             ("warm", dark.warm, light.warm),
+            ("warm_bright", dark.warm_bright, light.warm_bright),
+            ("prompt_border", dark.prompt_border, light.prompt_border),
             ("strong", dark.strong, light.strong),
             ("selection_bg", dark.selection_bg, light.selection_bg),
             ("selection_fg", dark.selection_fg, light.selection_fg),

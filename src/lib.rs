@@ -28,9 +28,11 @@ pub mod app;
 pub mod approval;
 pub mod bg_wake;
 pub mod child_results;
+pub mod clipboard_image;
 pub mod exit_dump;
 pub mod frame_log;
 pub mod handlers;
+mod input_history;
 pub mod interact_slot;
 pub mod interaction;
 pub mod picker;
@@ -47,10 +49,13 @@ pub mod term_guard;
 pub mod theme;
 pub mod tips;
 
+pub use app::PendingImage;
 pub use approval::{ApprovalItem, ApprovalModeSwitch, RuntimeApprovalMode};
 pub use exit_dump::{ExitDumpMode, SessionFacts};
 pub use interact_slot::{CancelSource, InteractSlot};
-pub use interaction::{AskAnswer, AskItem, AskOption, LiveInteractionChannel};
+pub use interaction::{
+    AskAnswer, AskItem, AskOption, LiveInteractionChannel, PickAnswer, PickItem, PickRow,
+};
 pub use run::run;
 pub use shell::{
     ApprovalCopy, CommandAction, CommandFuture, CommandSpec, ConsentProbe, CopyFacts, CopyMode,
@@ -59,8 +64,8 @@ pub use shell::{
     SessionArchivedFn, SessionBoot, SessionBootFn, SessionEndFn, SessionEnumerateFn, SessionIo,
     SessionRestoreFn, SessionRow, ShellFlow, ShellHandles, ShellSpec, SkillBridge, SkillRebakeFn,
     SkillRouteFn, StatusFace, SubmitHook, Synthetic, TaskFuture, TickFacts, TickOut, TipsFetchFn,
-    TipsSlot, TitleGenerator, TitleSlot, TitleWriteFn, UpdateCheckFn, UpdateSlot, Wordmark,
-    WordmarkBuilder,
+    TipsSlot, TitleGenerator, TitleSlot, TitleWriteFn, UpdateCheckFn, UpdateSlot, VisionProbe,
+    Wordmark, WordmarkBuilder,
 };
 pub use theme::{BrandRow, ColorScheme, ShellToken, SpanSpec, Theme};
 pub use tips::{TipItem, TipKind};

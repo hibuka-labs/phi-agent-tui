@@ -39,6 +39,48 @@ pub struct AskItem {
     pub answer_tx: oneshot::Sender<AskAnswer>,
 }
 
+// Pick vocabulary: the product-pushed list picker (the `/model` chooser).
+// Same queue shape as asks — the item carries the channel the answer returns
+// on — but the modal owns a typed filter instead of a question.
+
+/// One row of a product pick: the display face only (id, label, note). How
+/// the product enumerates its candidates is its own policy; the shell only
+/// renders rows and reports which one the user confirmed.
+#[derive(Debug, Clone)]
+pub struct PickRow {
+    /// The answer key handed back on confirm (e.g. a model name).
+    pub id: String,
+    /// What the user reads (e.g. `claude-opus-5-5 [main]`).
+    pub label: String,
+    /// Optional note under the label (e.g. "current").
+    pub note: Option<String>,
+    /// The row to highlight (the product's "this is the current one" mark).
+    pub current: bool,
+}
+
+/// The picker's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickAnswer {
+    /// The user confirmed `id`. `literal` marks the typed-name fallback: the
+    /// filter matched no row and Enter took the text as typed (the product's
+    /// "set it anyway" escape hatch).
+    Chosen { id: String, literal: bool },
+    /// Esc / dismiss — nothing changes.
+    Cancelled,
+}
+
+/// One pending pick handed to the picker, carrying the channel the answer
+/// returns on.
+#[derive(Debug)]
+pub struct PickItem {
+    /// The window title (product copy, per pick).
+    pub title: String,
+    /// The rows to choose from.
+    pub rows: Vec<PickRow>,
+    /// Complete this to deliver the user's answer back to the caller.
+    pub answer_tx: oneshot::Sender<PickAnswer>,
+}
+
 /// The ExecCtx interaction channel over the live shell surfaces.
 pub struct LiveInteractionChannel {
     gate: Arc<dyn ApprovalHandler>,

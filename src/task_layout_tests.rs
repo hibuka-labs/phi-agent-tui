@@ -278,18 +278,48 @@ fn fit_lead_fits_at_every_returned_width() {
     }
 }
 
+#[test]
+fn fit_lead_reports_where_the_tail_begins() {
+    // #4 配色分层: the renderer needs the split point between the live phase
+    // word and the parenthetical hint, so the two can wear different slots.
+    let lead = lead_fixture();
+    let fit = fit_lead(&lead, w(&lead.full()) + TIP_GAP + TIP_MIN_COLS);
+    let start = fit.tail_start.expect("the full lead keeps its tail");
+    let expected_head = format!("{}{}", lead.head, lead.activity);
+    assert_eq!(&fit.text[..start], expected_head);
+    assert_eq!(&fit.text[start..], lead.tail);
+
+    // The activity suffix drops, but the tail's start moves with it.
+    let fit = fit_lead(&lead, w(&lead.no_activity()));
+    let start = fit.tail_start.expect("the tail survives the activity drop");
+    assert_eq!(&fit.text[..start], lead.head);
+    assert_eq!(&fit.text[start..], lead.tail);
+
+    // The reassurance tail is the thing that goes: no split point survives.
+    let fit = fit_lead(&lead, w(&lead.min()));
+    assert_eq!(fit.tail_start, None);
+    assert_eq!(fit.text, lead.min());
+
+    // Past the ladder the row is hard-cut — the tail is gone with it.
+    let fit = fit_lead(&lead, 4);
+    assert_eq!(fit.tail_start, None);
+}
+
 // ── frame height / window ────────────────────────────────────────────────
 
 #[test]
 fn frame_height_full_shrink_suppress() {
-    assert_eq!(frame_height(0, 10), 3); // one content row is the floor
-    assert_eq!(frame_height(1, 10), 3);
-    assert_eq!(frame_height(6, 10), 8); // 6 + 2 borders
-    assert_eq!(frame_height(20, 10), 8); // content caps at 6
-    assert_eq!(frame_height(6, 8), 8);
+    // #3 任务面板框只留上边框: the frame spends one border row (the top
+    // rule), not two.
+    assert_eq!(frame_height(0, 10), 2); // one content row is the floor
+    assert_eq!(frame_height(1, 10), 2);
+    assert_eq!(frame_height(6, 10), 7); // 6 + 1 border
+    assert_eq!(frame_height(20, 10), 7); // content caps at 6
+    assert_eq!(frame_height(6, 8), 7);
     assert_eq!(frame_height(6, 5), 5); // shrink to what fits
     assert_eq!(frame_height(6, 3), 3); // border + 1 content is the floor
-    assert_eq!(frame_height(6, 2), 0); // suppressed: status line survives
+    assert_eq!(frame_height(6, 2), 2); // shrink to what fits
+    assert_eq!(frame_height(6, 1), 0); // suppressed: status line survives
     assert_eq!(frame_height(0, 0), 0);
 }
 
@@ -355,7 +385,9 @@ fn live_face_height_caps_shrinks_suppresses() {
 fn live_row_widths_strip_the_files_column() {
     assert_eq!(live_row_widths(40, 16), (16, 24));
     assert_eq!(live_row_widths(20, 5), (12, 8)); // name floor 12
-    assert_eq!(live_row_widths(20, 100), (16, 4)); // name cap 16
+    // #13 任务列宽: the name column now caps at 28, not 16.
+    assert_eq!(live_row_widths(20, 100), (20, 0)); // physics: the name eats it
+    assert_eq!(live_row_widths(40, 100), (28, 12)); // name cap 28
     // Physics: the name alone may eat the whole budget.
     assert_eq!(live_row_widths(10, 16), (10, 0));
     assert_eq!(live_row_widths(0, 16), (0, 0));
@@ -395,13 +427,16 @@ fn overflow_line_counts_and_degrades_tail_first() {
 #[test]
 fn column_widths_squeeze_right_to_left() {
     // Comfortable: activity is the flex column and takes the slack.
-    assert_eq!(column_widths(40, 16), (16, 8, 16));
-    assert_eq!(column_widths(30, 5), (12, 8, 10)); // name floor 12
-    assert_eq!(column_widths(30, 100), (16, 8, 6)); // name cap 16
+    assert_eq!(column_widths(40, 16), (16, 12, 12));
+    assert_eq!(column_widths(30, 5), (12, 12, 6)); // name floor 12
+    // #13 任务列宽: the name caps at 28, the files column is 12.
+    assert_eq!(column_widths(50, 100), (28, 12, 10)); // name cap 28
     // Activity shrinks to zero first…
-    assert_eq!(column_widths(25, 16), (16, 8, 1));
-    assert_eq!(column_widths(24, 16), (16, 8, 0));
+    assert_eq!(column_widths(40, 28), (28, 12, 0));
+    assert_eq!(column_widths(30, 28), (28, 2, 0));
     // …then the files column…
+    assert_eq!(column_widths(25, 16), (16, 9, 0));
+    assert_eq!(column_widths(24, 16), (16, 8, 0));
     assert_eq!(column_widths(18, 16), (16, 2, 0));
     assert_eq!(column_widths(20, 16), (16, 4, 0));
     // …then the name to its 12-column floor; physics wins below that.

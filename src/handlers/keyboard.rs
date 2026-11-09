@@ -32,6 +32,7 @@ impl App {
 
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let shift = modifiers.contains(KeyModifiers::SHIFT);
+        let alt = modifiers.contains(KeyModifiers::ALT);
         let super_key = modifiers.contains(KeyModifiers::SUPER);
 
         // Any key dismisses a transient notice (copy feedback) before handling.
@@ -52,13 +53,27 @@ impl App {
             return None;
         }
 
-        // Ctrl+C: copy selection → cancel running → double-press to quit.
+        // While the ask clarify input is up, Ctrl+C is the composer-clear
+        // gesture: it empties the popup's own buffer and nothing else — never
+        // a cancel or a quit from behind the modal (Esc is the way out).
+        if self.ask_clarify.is_some() && ctrl && code == Char('c') {
+            self.ask_clarify_clear();
+            self.quit_hint_at = None;
+            return None;
+        }
+
+        // Ctrl+C: copy selection → cancel running → clear a draft → cancel
+        // background tasks → double-press to quit.
         //   1. If there's an active selection, copy it (caller clears selection).
         //   2. If the agent is running (or approval pending), cancel it; a
         //      second press within the timeout force-quits (the cancel path
         //      can stall deep in the runtime — the escape hatch must not).
-        //   3. If there are running background tasks, cancel them.
-        //   4. Otherwise, show a hint; a second Ctrl+C within timeout quits.
+        //   3. If the composer holds a draft, clear it first: one press deals
+        //      with the text, quitting takes an explicit second gesture. (A
+        //      running turn keeps cancel at priority 2, so a typed draft
+        //      survives the cancel and is cleared by the next press.)
+        //   4. If there are running background tasks, cancel them.
+        //   5. Otherwise, show a hint; a second Ctrl+C within timeout quits.
         if ctrl && code == Char('c') {
             const DOUBLE_PRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
             if self.selection_state.selection.is_some() {
@@ -67,7 +82,7 @@ impl App {
                 self.quit_hint_at = None;
                 return Some(Action::CopySelection);
             }
-            if self.running || !self.approval_queue.is_empty() {
+            if self.running || !self.approval_queue.is_empty() || !self.pick_queue.is_empty() {
                 // A cancel was already requested recently and the agent is
                 // still stuck: force-quit instead of sending a no-op cancel.
                 if let Some(at) = self.quit_hint_at
@@ -81,6 +96,15 @@ impl App {
                 self.quit_hint_at = Some(Instant::now());
                 self.set_notice("Cancelling... press Ctrl+C again to force quit");
                 return Some(Action::Cancel);
+            }
+            // A draft is the user's own typing: clear it before any quit
+            // gesture, and start a fresh gesture window (clearing is the
+            // complete action; it must not drift into a quit).
+            if !self.composer.text().is_empty() {
+                tracing::info!("ctrl+c: draft -> clear composer");
+                self.composer.clear();
+                self.quit_hint_at = None;
+                return None;
             }
             // Cancel running background tasks
             let running_bg_tasks: Vec<String> = self
@@ -214,14 +238,37 @@ impl App {
             };
         }
 
-        // While an ask_user popup is showing, the list owns the keyboard:
-        // ↑↓ move the cursor, Enter commits the row under it, Esc skips (a
-        // skip is an answer too — the tool's contract says so). Everything
-        // else is swallowed so it never lands in the composer behind the
-        // popup.
+        // While an ask_user popup is showing, the popup owns the keyboard:
+        // ↑↓ move the cursor (the trailing "Chat about this" pseudo-row is a
+        // stop), Enter commits the row under it, Esc skips (a skip is an
+        // answer too — the tool's contract says so). Enter on the pseudo-row
+        // swaps in the clarify input, whose own buffer owns every key until
+        // Enter sends the text or Esc backs out to the list. Everything else
+        // is swallowed so it never lands in the composer behind the popup.
         if !self.ask_queue.is_empty() {
             let bare = !modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+            if self.ask_clarify.is_some() {
+                return match code {
+                    Enter if kind == KeyEventKind::Press && bare => {
+                        self.answer_ask_clarify();
+                        None
+                    }
+                    Esc if kind == KeyEventKind::Press && bare => {
+                        self.ask_clarify_cancel();
+                        None
+                    }
+                    Backspace if kind == KeyEventKind::Press && bare => {
+                        self.ask_clarify_backspace();
+                        None
+                    }
+                    Char(c) if kind == KeyEventKind::Press && bare => {
+                        self.ask_clarify_push(c);
+                        None
+                    }
+                    _ => None,
+                };
+            }
             return match code {
                 Up if kind == KeyEventKind::Press && bare => {
                     self.ask_move(-1);
@@ -232,11 +279,52 @@ impl App {
                     None
                 }
                 Enter if kind == KeyEventKind::Press && bare => {
-                    self.answer_ask_front(Some(self.ask_selection));
+                    if self.ask_on_chat_row() {
+                        self.ask_clarify_open();
+                    } else {
+                        self.answer_ask_front(Some(self.ask_selection));
+                    }
                     None
                 }
                 Esc if kind == KeyEventKind::Press && bare => {
                     self.answer_ask_front(None);
+                    None
+                }
+                _ => None,
+            };
+        }
+
+        // While the product pick modal is showing, it owns the keyboard:
+        // the typed filter narrows the rows, ↑↓ move the cursor, Enter
+        // confirms (the typed name when nothing matches), Esc cancels.
+        // Everything else is swallowed so it never lands in the composer
+        // behind the modal (Ctrl+C already cancelled above).
+        if !self.pick_queue.is_empty() {
+            let bare = !modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+            return match code {
+                Up if kind == KeyEventKind::Press && bare => {
+                    self.pick_move(-1);
+                    None
+                }
+                Down if kind == KeyEventKind::Press && bare => {
+                    self.pick_move(1);
+                    None
+                }
+                Enter if kind == KeyEventKind::Press && bare => {
+                    self.pick_confirm();
+                    None
+                }
+                Esc if kind == KeyEventKind::Press && bare => {
+                    self.pick_cancel();
+                    None
+                }
+                Backspace if kind == KeyEventKind::Press && bare => {
+                    self.pick_backspace();
+                    None
+                }
+                Char(c) if kind == KeyEventKind::Press && bare => {
+                    self.pick_push_char(c);
                     None
                 }
                 _ => None,
@@ -283,6 +371,13 @@ impl App {
                 self.toggle_task_panel();
                 None
             }
+            // Ctrl+V (also Cmd+V where the terminal forwards it — most
+            // macOS terminals keep Cmd+V for their own Paste): paste a
+            // screenshot as a pending attachment chip. Bracketed text
+            // paste is untouched (it arrives as its own event); when the
+            // clipboard holds no image the handler falls back to a plain
+            // text paste.
+            Char('v') if ctrl || super_key => Some(Action::PasteImage),
             Esc => {
                 // D8: in S2 the first Esc only drops the selection back to
                 // S1 — navigation keys never touch the (invisible) draft.
@@ -306,6 +401,7 @@ impl App {
             // they are the list's own keys.
             Enter if ctrl => {
                 self.steal_focus_to_composer();
+                self.scroll_to_bottom();
                 // Ctrl+Enter: force-send (simplified `chat:sendNow`). Queue
                 // the draft and interrupt the turn so the queue goes out right
                 // away (the terminal flush delivers it). With nothing to send
@@ -328,8 +424,15 @@ impl App {
                 self.steal_focus_to_composer();
                 if shift {
                     self.composer.insert_char('\n');
-                    None
-                } else if self.running {
+                    return None;
+                }
+                // Enter always sinks the transcript to the newest lines: the
+                // key is the "back to now" gesture whether the composer
+                // submits, steers, or is empty — an empty Enter used to fall
+                // through to `None` and left the view wherever it had been
+                // scrolled.
+                self.scroll_to_bottom();
+                if self.running {
                     // Never a silent drop: while the turn runs, Enter queues
                     // the message (Steer → delivered at the next tool
                     // boundary). An empty composer queues nothing.
@@ -340,7 +443,9 @@ impl App {
                         self.composer.clear();
                         Some(Action::Steer(text))
                     }
-                } else if !self.composer.is_empty() {
+                } else if !self.composer.is_empty() || !self.pending_images.is_empty() {
+                    // A send is text, images, or both — a lone chip row
+                    // submits too.
                     let text = self.composer.text();
                     self.composer.clear();
                     // Deliberately no turn state here. The echoed user message,
@@ -358,8 +463,23 @@ impl App {
                     None
                 }
             }
+            // Ctrl+J: the one newline chord every terminal can send.
+            // Shift+Enter only reports separately under the kitty keyboard
+            // protocol; a raw-mode legacy terminal sends 0x0A for both Enter
+            // chords, and crossterm maps 0x0A to Ctrl+J (it means Enter only
+            // outside raw mode).
+            Char('j') if ctrl => {
+                self.composer.insert_char('\n');
+                None
+            }
             Backspace => {
-                self.composer.backspace();
+                // An empty composer backspaces the attachment chips instead
+                // of nothing: the last pasted screenshot goes first.
+                if self.composer.is_empty() {
+                    self.pending_images.pop();
+                } else {
+                    self.composer.backspace();
+                }
                 None
             }
             Delete => {
@@ -372,6 +492,16 @@ impl App {
             }
             Right => {
                 self.composer.move_right();
+                None
+            }
+            // Alt+↑/↓ keep pure cursor movement — plain ↑/↓ are history's
+            // (#7), so a multi-line draft still has its navigation keys.
+            Up if alt => {
+                self.composer.move_up();
+                None
+            }
+            Down if alt => {
+                self.composer.move_down();
                 None
             }
             Up => {
@@ -389,6 +519,16 @@ impl App {
                     self.task_list_up();
                     return None;
                 }
+                // History recall (#7): fish-style ring whose slots include
+                // the draft — ↑ past the oldest finds back what you were
+                // typing. With no history the key keeps its cursor meaning.
+                if !self.input_history.is_empty() {
+                    let current = self.composer.text();
+                    if let Some(entry) = self.input_history.up(&current) {
+                        self.set_composer_text(&entry);
+                        return None;
+                    }
+                }
                 self.composer.move_up();
                 None
             }
@@ -400,6 +540,14 @@ impl App {
                     self.task_list_down();
                     return None;
                 }
+                // While a recall cycle is live, ↓ walks newer — through the
+                // draft slot and around. Idle (or after an edit), the key
+                // keeps its cursor meaning.
+                let current = self.composer.text();
+                if let Some(entry) = self.input_history.down(&current) {
+                    self.set_composer_text(&entry);
+                    return None;
+                }
                 self.composer.move_down();
                 None
             }
@@ -409,6 +557,11 @@ impl App {
                     return None;
                 }
                 self.composer.move_home();
+                None
+            }
+            End if ctrl => {
+                // Jump to the newest lines: the status bar's "to bottom".
+                self.scroll_to_bottom();
                 None
             }
             End => {

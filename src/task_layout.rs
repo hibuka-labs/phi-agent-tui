@@ -249,6 +249,15 @@ pub struct StatusFit {
     pub text: String,
     /// `false` once the squeeze ladder has spent the Tip's room.
     pub tip_allowed: bool,
+    /// Byte offset in `text` where the lead's tail begins — the parenthetical
+    /// hint (`(Ctrl+C cancel)`, `(N daemon(s))`, the auto-continue promise).
+    /// `None` when the tail is not on screen (the ladder dropped it, or the
+    /// final elide cut it away).
+    ///
+    /// The renderer splits the row here so the live phase word and the hint
+    /// beside it wear different slots (#4 配色分层): the phase word takes the
+    /// brand's bright warm, the parenthetical drops to the gray hint slot.
+    pub tail_start: Option<usize>,
 }
 
 fn tip_room(text: &str, width: usize) -> bool {
@@ -270,19 +279,35 @@ pub fn fit_lead(lead: &LeadPieces, width: usize) -> StatusFit {
         return StatusFit {
             text: wide,
             tip_allowed: true,
+            tail_start: Some(lead.head.len() + lead.activity.len()),
         };
     }
-    for text in [lead.full(), lead.no_activity(), lead.min()] {
+    // The min() stage: a phase lead's cancel hint survives every stage, so its
+    // split point survives too; a reassurance tail is gone by then.
+    let min_tail_start = if lead.tail_is_reassurance {
+        None
+    } else {
+        Some(lead.head.len())
+    };
+    for (text, tail_start) in [
+        (lead.full(), Some(lead.head.len() + lead.activity.len())),
+        (lead.no_activity(), Some(lead.head.len())),
+        (lead.min(), min_tail_start),
+    ] {
         if fits(&text, width) {
             return StatusFit {
                 text,
                 tip_allowed: false,
+                tail_start,
             };
         }
     }
+    // Past the ladder: hard-cut from the head's tail (weak tenants at the
+    // tail). The tail is gone with the cut, so no split point survives.
     StatusFit {
         text: elide(&lead.min(), width, Elide::Head),
         tip_allowed: false,
+        tail_start: None,
     }
 }
 
@@ -303,10 +328,15 @@ pub fn panel_title(total: usize, unacked_failures: usize) -> String {
 /// the frame chrome, next to the thing it opens.
 pub const FRAME_CLOSE_HINT: &str = "^T close";
 
-/// Content rows inside the task frame at full size (6 + 2 borders = 8).
+/// Content rows inside the task frame at full size (6 + 1 border = 7).
+///
+/// #3 任务面板框只留上边框: the frame draws its top rule only, so it spends
+/// one border row, not two.
 pub const FRAME_CONTENT_ROWS: usize = 6;
 /// One content row is the floor before the frame is suppressed outright.
 pub const FRAME_MIN_CONTENT: usize = 1;
+/// Border rows the frame spends on its chrome (the top rule — the only one).
+pub const FRAME_BORDER_ROWS: usize = 1;
 
 /// Hard row cap of the frameless live face (Rev 2026-11-04: hard 6-row cap 限高 6 行硬).
 /// Same budget as the frame's content rows — one row region, two modes.
@@ -318,11 +348,11 @@ pub const LIVE_FACE_ROWS: usize = FRAME_CONTENT_ROWS;
 /// won't fit — the status line always survives (design: 矮终端).
 pub fn frame_height(rows: usize, avail: u16) -> u16 {
     let content = rows.clamp(FRAME_MIN_CONTENT, FRAME_CONTENT_ROWS);
-    let full = content as u16 + 2;
+    let full = content as u16 + FRAME_BORDER_ROWS as u16;
     if full <= avail {
         return full;
     }
-    if avail >= FRAME_MIN_CONTENT as u16 + 2 {
+    if avail >= FRAME_MIN_CONTENT as u16 + FRAME_BORDER_ROWS as u16 {
         avail
     } else {
         0
@@ -365,9 +395,12 @@ pub fn window_offset(offset: usize, sel: Option<usize>, total: usize, view_rows:
 /// column and absorbs the shrink first, then the files column, then the name
 /// down to its 12-column floor. Measured in display columns.
 pub fn column_widths(inner_w: usize, name_wanted: usize) -> (usize, usize, usize) {
+    // #13 任务列宽: the name column widened to ~28 (it is the row's identity),
+    // the files column to 12. The squeeze order is unchanged — activity
+    // flexes first, then files, then the name.
     const NAME_MIN: usize = 12;
-    const NAME_MAX: usize = 16;
-    const FILES_W: usize = 8;
+    const NAME_MAX: usize = 28;
+    const FILES_W: usize = 12;
 
     let mut name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
     let mut files_w = FILES_W;
@@ -388,8 +421,9 @@ pub fn column_widths(inner_w: usize, name_wanted: usize) -> (usize, usize, usize
 /// Frameless live-face widths `(name, activity)` — the box's columns with the
 /// files column stripped (Rev 2026-11-04: the row render reuses the frame's row render 剥列).
 pub fn live_row_widths(inner_w: usize, name_wanted: usize) -> (usize, usize) {
+    // #13 任务列宽: the live face shares the frame's name width.
     const NAME_MIN: usize = 12;
-    const NAME_MAX: usize = 16;
+    const NAME_MAX: usize = 28;
 
     let mut name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
     let mut act_w = inner_w.saturating_sub(name_w);
