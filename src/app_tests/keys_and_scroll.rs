@@ -12,6 +12,33 @@ fn shift_enter_inserts_newline_not_submit() {
     assert_eq!(app.composer.text(), "a\n");
 }
 
+/// A terminal that reports the Backspace/Delete key as BS (0x08) — xterm's
+/// default, and what many Linux setups send — reaches crossterm as
+/// `Char('h') + Ctrl`. Without a binding the composer TYPES a literal 'h'
+/// per press instead of deleting ("hh" where the user asked for a delete).
+#[test]
+fn ctrl_h_deletes_backward_instead_of_typing_h() {
+    let mut app = App::new();
+    app.composer.insert_str("ab");
+    assert_eq!(
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        None
+    );
+    assert_eq!(app.composer.text(), "a");
+}
+
+/// Any other Ctrl+<letter> chord is not text either: crossterm turns control
+/// bytes (0x01–0x1A) into `Char(letter) + Ctrl`, so an unhandled chord would
+/// type a letter into the composer instead of doing what the terminal means.
+#[test]
+fn ctrl_letter_chords_never_type_into_the_composer() {
+    let mut app = App::new();
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(app.composer.text(), "");
+}
+
 #[test]
 fn ctrl_c_cancels_when_running() {
     let mut app = App::new();

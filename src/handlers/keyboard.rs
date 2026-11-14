@@ -472,6 +472,20 @@ impl App {
                 self.composer.insert_char('\n');
                 None
             }
+            // Ctrl+H: the delete-backward chord every terminal can send.
+            // A raw-mode terminal that reports the Backspace/Delete key as BS
+            // (0x08 — xterm's default, and what many Linux setups send for
+            // that key) reaches crossterm as `Char('h') + Ctrl`; without this
+            // binding the composer TYPES a literal 'h' per press instead of
+            // deleting ("hh" where the user asked for a delete).
+            Char('h') if ctrl => {
+                if self.composer.is_empty() {
+                    self.pending_images.pop();
+                } else {
+                    self.composer.backspace();
+                }
+                None
+            }
             Backspace => {
                 // An empty composer backspaces the attachment chips instead
                 // of nothing: the last pasted screenshot goes first.
@@ -607,6 +621,17 @@ impl App {
                 None
             }
             Char(c) => {
+                // A chord is not text. crossterm turns the control bytes
+                // (0x01–0x1A) into `Char(letter) + Ctrl`, so an unhandled
+                // Ctrl+<letter> would type a letter into the composer instead
+                // of doing what the terminal means by it (Ctrl+A would type
+                // 'a', Ctrl+U 'u'…). Every chord the product owns is bound
+                // above; the rest are dropped, never typed.
+                if modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                {
+                    return None;
+                }
                 self.steal_focus_to_composer();
                 self.composer.insert_char(c);
                 None
