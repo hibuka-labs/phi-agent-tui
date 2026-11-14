@@ -265,22 +265,7 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
     });
 
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
-    // Kitty keyboard protocol: lets crossterm read the Command (Super) modifier
-    // so Cmd+C can be bound to copy. Terminals that don't support it (e.g. the
-    // macOS Terminal.app) ignore this and keep legacy key reporting.
-    execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-        )
-    )?;
+    enter_terminal_mode(&mut stdout)?;
     let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
