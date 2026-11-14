@@ -361,7 +361,10 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
             // screen. Wrap each markdown row into visual rows (span-level,
             // style-preserving) and map every row back to source line `i`.
             let width = app.transcript.wrap_width();
-            let md_lines = render_markdown(&line.text);
+            // The width budget is what keeps a table a table: without it a
+            // long cell makes the box wider than the pane and the
+            // soft-wrap below shreds the borders.
+            let md_lines = render_markdown_with_width(&line.text, Some(width));
             for md_line in md_lines {
                 for (mut wrapped, seam) in wrap_line_rows(md_line, width) {
                     apply_selection(&mut wrapped, app, vis_idx);
@@ -427,7 +430,7 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
         // tail is uncommitted prose, and clipping it hides the end of an
         // in-flight answer until it commits.
         let width = app.transcript.wrap_width();
-        let md_lines = render_markdown(raw);
+        let md_lines = render_markdown_with_width(raw, Some(width));
         for md_line in md_lines {
             for wrapped in wrap_line(md_line, width) {
                 visual_map.push_unselectable(line_plain_text(&wrapped));

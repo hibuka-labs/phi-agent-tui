@@ -4,6 +4,24 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
+### Added
+- **Attention lines get their own face.** A `push_notice_line` path wraps
+  engine notices as amber `LineKind::Notice` lines — the counterpart of the
+  red error line, so a warning that means "look at this" no longer reads as
+  "something broke". An engine notice that arrives while the run is still
+  settling waits for the turn to land before it is shown, so the user sees
+  one settled transcript instead of a line that jumps.
+
+### Changed
+- **Breaking (dependency):** `phi-agent` requirement bumped from 0.21.0 to
+  0.22.0, `phi-tui` from 0.4.0 to 0.5.0, `phi-kernel-tools` from 0.13.0 to
+  0.14.0, `phi-telemetry` from 0.7.5 to 0.8.0 and `log-core` from 0.1.4 to
+  0.1.5, keeping the framework on a single version of each family crate.
+
+
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

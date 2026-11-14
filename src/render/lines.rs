@@ -35,6 +35,10 @@ pub(super) fn style_for(kind: LineKind, theme: Theme) -> Style {
         // records that a real mid-run interruption happened.
         LineKind::Cancelled => Style::default().fg(theme.muted),
         LineKind::Approval => Style::default().fg(Color::Yellow),
+        // Attention, not failure: amber says "look here", red says "this
+        // broke". A waiting-for-input notice is the first kind, not the
+        // second.
+        LineKind::Notice => Style::default().fg(Color::Yellow),
         LineKind::User => Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
     }
 }

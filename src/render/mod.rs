@@ -48,7 +48,7 @@ use phi_tui::layout::{Preview, folded_body, opens_block};
 
 use phi_tui::lines::{LineKind, ToolState};
 
-use phi_tui::markdown::{line_plain_text, render_markdown};
+use phi_tui::markdown::{line_plain_text, render_markdown_with_width};
 
 use phi_tui::popup_list::{GUTTER_W, PopupList, band_width};
 

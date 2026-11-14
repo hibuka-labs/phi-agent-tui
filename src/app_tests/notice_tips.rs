@@ -67,6 +67,35 @@ fn notice_warning_renders_persistent_error_line() {
     );
 }
 
+/// The attention kind is the amber twin of the red warning: "look at this"
+/// without "this broke" — a task blocked on an interactive prompt.
+#[test]
+fn notice_attention_renders_amber_not_red() {
+    let mut app = App::new();
+    app.handle_event(TuiEvent::Runtime(tool_started("execute_command")));
+    app.handle_event(TuiEvent::Runtime(notice(
+        phi_agent::NoticeKind::Attention,
+        "tool:execute_command",
+        "task bg_x is waiting for input (confirm): Continue? [Y/n]",
+    )));
+
+    let line = app.transcript.output.last().expect("one line");
+    assert_eq!(
+        line.kind,
+        LineKind::Notice,
+        "an attention notice must not wear the error face"
+    );
+    assert!(
+        line.text.contains("waiting for input"),
+        "the task fact reaches the user, got: {}",
+        line.text
+    );
+    assert!(
+        matches!(app.status, AgentStatus::Running { .. }),
+        "an attention notice must not settle the turn"
+    );
+}
+
 /// The three judge fail-open causes (unparsed / call failed / unavailable)
 /// are indistinguishable to a user and none of them is actionable — product
 /// layer collapses them to one copy (design §8: mechanism layer keeps the

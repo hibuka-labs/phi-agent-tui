@@ -612,13 +612,21 @@ impl App {
                 }
                 // Engine-mechanism notices (Batch E): guard degradation,
                 // reaper, ... Warning is a persistent red line that must NOT
-                // settle the turn (the run may still be finishing); Progress
+                // settle the turn (the run may still be finishing); Attention
+                // is its amber twin for "look at this, nothing broke"; Progress
                 // rides the status bar like tool progress; Info is a plain
                 // output line.
                 UserEvent::Notice { kind, source, text } => match kind {
                     NoticeKind::Warning => {
                         self.flush_pending();
                         self.push_error_line(&notice_line(&source, &text));
+                    }
+                    NoticeKind::Attention => {
+                        self.flush_pending();
+                        // Attention, not failure: "the task is waiting for
+                        // you" is not an error, so it does not wear the red
+                        // error face.
+                        self.push_notice_line(&notice_line(&source, &text));
                     }
                     NoticeKind::Progress => {
                         self.live_progress = Some(text);

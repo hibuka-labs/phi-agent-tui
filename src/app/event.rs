@@ -98,6 +98,28 @@ impl App {
         }
     }
 
+    /// Amber attention line for engine notices (wrapped).
+    ///
+    /// The counterpart of [`Self::push_error_line`]: a warning that means
+    /// "look at this" wears its own face, so a red line keeps meaning
+    /// "something broke".
+    pub(crate) fn push_notice_line(&mut self, msg: &str) {
+        let text = msg.to_string();
+        for (i, line) in wrap(&text, self.transcript.wrap_width())
+            .into_iter()
+            .enumerate()
+        {
+            self.transcript.push(OutputLine {
+                spans: None,
+                original: if i == 0 { Some(text.clone()) } else { None },
+                detail: None,
+                text: line,
+                kind: LineKind::Notice,
+                tool_state: None,
+            });
+        }
+    }
+
     /// Common end-of-turn settlement. If sub-agents or *bounded* background
     /// jobs are still running the task is NOT done — enter the `Waiting` state
     /// and keep the bookkeeping alive (the fan-in batch injection or the
