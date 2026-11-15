@@ -43,10 +43,12 @@ use crate::theme::ShellToken;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ExitDumpMode {
-    /// Replay the whole session (the default).
-    #[default]
+    /// Replay the whole session.
     Full,
-    /// Header/footer plus the final answer only.
+    /// Header/footer plus the final answer only (the default): a long session
+    /// replayed in full floods the screen and, on a slow console, blocks on
+    /// the write.
+    #[default]
     Summary,
     /// Nothing — the alt-screen content is discarded.
     None,
