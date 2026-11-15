@@ -4,6 +4,26 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-16
+
+### Fixed
+- **The exit replay defaults to the summary.** Replaying what the session
+  ended with showed every line instead of the summary the user actually
+  wants to read.
+
+- **The kitty keyboard push is best-effort, not a startup gate.** A
+  terminal that does not support the keyboard protocol used to stop the
+  session from starting. It now starts, and the push is skipped.
+
+- **Ctrl+H deletes backward instead of typing `h`.** The composer read
+  Ctrl+H as a character.
+
+### Changed
+- **Breaking (dependency):** `phi-agent` requirement bumped from 0.22.0
+  to 0.23.0, `phi-kernel-tools` from 0.14.1 to 0.15.0 and `phi-telemetry`
+  from 0.8.0 to 0.9.0, keeping the family on a single version of each
+  crate.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added
