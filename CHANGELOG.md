@@ -4,6 +4,17 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-16
+
+### Fixed
+- **The refused-keyboard-pop test no longer fails on Windows.** The test
+  modelled the legacy console API's refusal as a failed *write*, but the
+  API refuses the kitty keyboard pop *before* it is ever written — so on
+  Windows the escape sequence never reached the writer and the mock could
+  not see the attempt. The test now asserts the observable invariant that
+  holds on every platform (the alternate screen is still left behind the
+  refused pop) and adds a Windows twin that pins the console-API contract.
+
 ## [0.4.0] - 2026-11-16
 
 ### Fixed
@@ -116,5 +127,7 @@ reusable framework crate.
 - Flipbook instrumentation (`frame_log`), exit transcript replay
   (`exit_dump`), and Unix termios self-heal (`term_guard`).
 
-[Unreleased]: https://github.com/hibuka-labs/phi-agent-tui/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hibuka-labs/phi-agent-tui/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/hibuka-labs/phi-agent-tui/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/hibuka-labs/phi-agent-tui/compare/v0.3.0...v0.4.0
 [0.1.0]: https://github.com/hibuka-labs/phi-agent-tui/releases/tag/v0.1.0

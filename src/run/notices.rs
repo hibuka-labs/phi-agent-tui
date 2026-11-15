@@ -159,12 +159,59 @@ mod tests {
             refused: false,
         };
         restore_terminal_mode(&mut out);
+        // The pop must be attempted — but only where crossterm expresses it
+        // as an escape sequence. On Windows the legacy console API refuses
+        // the pop outright ("Keyboard progressive enhancement not
+        // implemented for the legacy Windows API.") without ever writing it
+        // to the writer, so the mock cannot see the attempt there. The
+        // refusal is real on both platforms; only its delivery differs.
+        #[cfg(not(windows))]
         assert!(out.refused, "the pop must be attempted");
+        // The alternate screen must be left whatever the pop did — this is
+        // the invariant the refusal actually broke: the pop used to eat the
+        // LeaveAlternateScreen behind it and strand the user on the blank
+        // alternate screen after exit.
         assert!(
             out.written
                 .windows(b"\x1B[?1049l".len())
                 .any(|w| w == b"\x1B[?1049l"),
             "LeaveAlternateScreen must survive a refused pop: {:?}",
+            String::from_utf8_lossy(&out.written)
+        );
+    }
+
+    /// The Windows twin of the test above: here the refusal arrives from the
+    /// legacy console API, not from the writer. crossterm's
+    /// `is_ansi_code_supported()` is false for the kitty keyboard pop, so
+    /// `queue()` takes the WinAPI branch and answers with "Keyboard
+    /// progressive enhancement not implemented for the legacy Windows API."
+    /// *without* writing the escape sequence — the mock never sees a
+    /// refusal, because the refusal happened off-writer.
+    ///
+    /// What must still hold is the same invariant: the alternate screen is
+    /// left behind the refused pop.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_pop_is_refused_by_the_console_api_and_never_written() {
+        let mut out = RefuseOn {
+            written: Vec::new(),
+            needle: b"\x1B[<1u", // pop: CSI < 1 u
+            refused: false,
+        };
+        restore_terminal_mode(&mut out);
+        assert!(!out.refused, "the WinAPI refusal never reaches the writer");
+        assert!(
+            !out.written
+                .windows(b"\x1B[<1u".len())
+                .any(|w| w == b"\x1B[<1u"),
+            "the refused pop must not be written: {:?}",
+            String::from_utf8_lossy(&out.written)
+        );
+        assert!(
+            out.written
+                .windows(b"\x1B[?1049l".len())
+                .any(|w| w == b"\x1B[?1049l"),
+            "LeaveAlternateScreen must survive the refused pop: {:?}",
             String::from_utf8_lossy(&out.written)
         );
     }
