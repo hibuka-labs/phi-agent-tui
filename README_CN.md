@@ -1,7 +1,7 @@
 # phi-agent-tui
 
 [![Crates.io](https://img.shields.io/crates/v/phi-agent-tui.svg)](https://crates.io/crates/phi-agent-tui)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 面向 LLM agent 产品的可复用终端应用壳，基于 ratatui + crossterm 与 phi 家族的
 agent 运行时。它把「人跟 agent 在终端里对话」的整个应用框架交给产品：事件循环与
@@ -102,4 +102,4 @@ run(spec, agent, handles).await?;
 
 ## 许可证
 
-MIT — 见 [LICENSE](LICENSE)。
+MIT OR Apache-2.0 — 见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。

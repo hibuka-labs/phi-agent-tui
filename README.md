@@ -1,7 +1,7 @@
 # phi-agent-tui
 
 [![Crates.io](https://img.shields.io/crates/v/phi-agent-tui.svg)](https://crates.io/crates/phi-agent-tui)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 A reusable terminal-app shell for LLM agent products, built on ratatui +
 crossterm and the phi family's agent runtime. It gives a product the whole
@@ -116,4 +116,4 @@ The reference consumer is **phimint**, the family's coding agent — its
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
