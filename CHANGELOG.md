@@ -4,6 +4,29 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
+### Added
+- **The picture labels ride into history.** The capture path
+  (`<image name=N path="...">`) follows the pixels into history, so an
+  evicted picture stays recoverable — the window-reset residue parser reads
+  the path fields back out.
+
+### Fixed
+- **A panic restores the mouse.** The panic hook now runs the full terminal
+  restore (raw mode, mouse reporting, alternate screen). It is the only
+  restore that runs when a panic aborts, and skipping the mouse resets left
+  the emulator emitting mouse-report fragments into whatever shell inherited
+  the terminal.
+
+### Changed
+- **Breaking (dependency):** `phi-agent` requirement bumped from 0.23.0 to
+  0.24.0, `phi-kernel-tools` from 0.15.0 to 0.16.0 and `phi-telemetry` from
+  0.9.0 to 0.10.0.
+
+### License
+- **Dual-licensed as MIT OR Apache-2.0.**
+
 ## [0.4.1] - 2026-11-16
 
 ### Fixed
