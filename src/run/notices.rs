@@ -51,6 +51,17 @@ pub(super) fn restore_terminal_mode(out: &mut impl io::Write) {
     let _ = execute!(out, LeaveAlternateScreen);
 }
 
+/// The panic hook's restore — what runs on the panicking thread before the
+/// default hook prints the panic. It is the ONLY restore that runs when a
+/// panic aborts (no unwind ever reaches [`TerminalGuard`]), so it must undo
+/// everything the TUI armed via [`enter_terminal_mode`] — mouse reporting
+/// included, or the emulator keeps emitting `CSI < Cb;Cx;Cy M` report
+/// fragments into whatever shell inherits the terminal (observed 2026-11-17).
+pub(super) fn restore_after_panic(out: &mut impl io::Write) {
+    let _ = disable_raw_mode();
+    restore_terminal_mode(out);
+}
+
 /// One-line startup notice for Apple Terminal users. Terminal.app forwards
 /// wheel/trackpad events to the app only while View → Allow Mouse Reporting
 /// is checked for that window (the macOS default is ON — an unchecked window
@@ -212,6 +223,54 @@ mod tests {
                 .windows(b"\x1B[?1049l".len())
                 .any(|w| w == b"\x1B[?1049l"),
             "LeaveAlternateScreen must survive the refused pop: {:?}",
+            String::from_utf8_lossy(&out.written)
+        );
+    }
+
+    /// protects: a panic that aborts never unwinds to `TerminalGuard`, so the
+    /// panic hook is the only restore that runs — and it used to skip
+    /// `DisableMouseCapture`, leaving mouse reporting armed in the emulator.
+    /// The shell that inherited the terminal then got flooded with
+    /// `CSI < Cb;Cx;Cy M` mouse-report fragments on every pointer move (live:
+    /// 2026-11-17, residue at the local prompt after the remote session died).
+    /// fails_when: `restore_after_panic` omits the mouse resets
+    /// (`?1006l`/`?1003l`/`?1000l`) or sends its steps as one chained
+    /// `execute!` that a refused kitty pop can eat.
+    #[cfg(not(windows))] // Windows disarms mouse via the console API, off-writer
+    #[test]
+    fn the_panic_restore_disables_mouse_reporting() {
+        let mut out = RefuseOn {
+            written: Vec::new(),
+            needle: b"\x1B[<1u", // pop: CSI < 1 u
+            refused: false,
+        };
+        restore_after_panic(&mut out);
+        let dump = String::from_utf8_lossy(&out.written);
+        for seq in ["\x1B[?1006l", "\x1B[?1003l", "\x1B[?1000l", "\x1B[?1049l"] {
+            assert!(
+                out.written.windows(seq.len()).any(|w| w == seq.as_bytes()),
+                "{seq} must be sent by the panic restore: {dump:?}"
+            );
+        }
+    }
+
+    /// The Windows twin: the console API disarms mouse reporting off-writer
+    /// (like the kitty pop), so no mouse bytes ever reach the mock — what must
+    /// still hold is that the panic restore leaves the alternate screen.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_panic_restore_still_leaves_the_alternate_screen() {
+        let mut out = RefuseOn {
+            written: Vec::new(),
+            needle: b"\x1B[<1u", // pop: CSI < 1 u
+            refused: false,
+        };
+        restore_after_panic(&mut out);
+        assert!(
+            out.written
+                .windows(b"\x1B[?1049l".len())
+                .any(|w| w == b"\x1B[?1049l"),
+            "LeaveAlternateScreen must be sent by the panic restore: {:?}",
             String::from_utf8_lossy(&out.written)
         );
     }

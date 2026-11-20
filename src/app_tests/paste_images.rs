@@ -182,3 +182,43 @@ fn a_rescued_submit_puts_the_chips_back() {
     assert_eq!(app.pending_images.len(), 1, "the chip came back");
     assert_eq!(app.pending_images[0].width, 7);
 }
+
+// ── image labels: the durable path rides into history with the picture ──
+
+/// protects: every attached picture gets a `<image name=N path="...">` label
+/// carrying its capture path — the eviction residue parser reads these
+/// fields back out, so an evicted picture stays recoverable. fails_when: the
+/// label loses the path, renumbers across calls, or is dropped for the
+/// second picture. no_claim: the model's use of the label.
+#[test]
+fn image_labels_carry_the_capture_path() {
+    let pending = vec![
+        crate::app::PendingImage {
+            path: std::path::PathBuf::from("/s/s1/attachments/shot-1.png"),
+            width: 10,
+            height: 20,
+        },
+        crate::app::PendingImage {
+            path: std::path::PathBuf::from("/s/s1/attachments/shot-2.png"),
+            width: 1,
+            height: 1,
+        },
+    ];
+    let labels = crate::run::image_label_lines(&pending);
+    assert!(
+        labels.contains("<image name=1 path=\"/s/s1/attachments/shot-1.png\">"),
+        "first label names its capture: {labels}"
+    );
+    assert!(
+        labels.contains("<image name=2 path=\"/s/s1/attachments/shot-2.png\">"),
+        "second label names its capture: {labels}"
+    );
+}
+
+/// protects: no pictures, no labels — a plain text body stays byte-identical.
+/// fails_when: empty input still emits label scaffolding.
+#[test]
+fn image_labels_are_empty_without_pending_images() {
+    let labels = crate::run::image_label_lines(&[]);
+    assert_eq!(labels, "");
+}

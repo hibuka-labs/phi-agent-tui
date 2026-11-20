@@ -189,10 +189,11 @@ pub(super) async fn agent_loop(
                 // channel: read the captures into attachments now. Synthetic
                 // turns never carry images, and a capture that cannot be read
                 // is a visible warning, never a silent drop.
-                let (attachments, attach_warnings) = if synthetic_run {
-                    (Vec::new(), Vec::new())
+                let (attachments, attach_warnings, image_labels) = if synthetic_run {
+                    (Vec::new(), Vec::new(), String::new())
                 } else {
-                    attachments_from(&pending_images)
+                    let (attachments, warnings) = attachments_from(&pending_images);
+                    (attachments, warnings, image_label_lines(&pending_images))
                 };
                 for warning in attach_warnings {
                     let _ = event_tx.send(TuiEvent::Warning(warning));
@@ -233,6 +234,14 @@ pub(super) async fn agent_loop(
                         skill,
                         warnings,
                     } => {
+                        // The picture labels ride the body into history: the
+                        // durable capture path follows the pixels, so an
+                        // evicted picture stays recoverable.
+                        let body = if image_labels.is_empty() {
+                            body
+                        } else {
+                            format!("{image_labels}\n{body}")
+                        };
                         // The product composed the full prompt (pristine base +
                         // active skills); the shell only bakes it. A failure is
                         // a mid-turn warning: the run continues, so this must
@@ -281,6 +290,13 @@ pub(super) async fn agent_loop(
                                 })
                                 .await
                         } else {
+                            // Same label ride as the baked arm — only real
+                            // turns carry pictures (synthetic runs never do).
+                            let body = if image_labels.is_empty() {
+                                body
+                            } else {
+                                format!("{image_labels}\n{body}")
+                            };
                             agent
                                 .run_turn_with_images(
                                     session.clone(),
@@ -378,4 +394,18 @@ fn attachments_from(
         }
     }
     (out, warnings)
+}
+
+/// One label line per attached picture: the durable capture path follows the
+/// image into history, so an evicted picture stays recoverable. The format is
+/// a machine contract — the window-reset residue parser
+/// (`agent_works::rotation_policy::image_residue`) reads the `path="..."`
+/// fields back out.
+pub fn image_label_lines(pending: &[crate::app::PendingImage]) -> String {
+    pending
+        .iter()
+        .enumerate()
+        .map(|(i, img)| format!("<image name={} path=\"{}\">", i + 1, img.path.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

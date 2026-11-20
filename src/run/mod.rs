@@ -249,17 +249,17 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
     // Terminal setup. The guard restores the terminal on any exit path.
     enable_raw_mode()?;
 
-    // Panic hook: restore the terminal BEFORE the default hook prints, or the
-    // panic text lands mid-frame in raw mode and smears across the status bar
-    // and input box (observed: a tool panic on a tokio worker corrupted the
-    // composer for the rest of the session). Installed once per process —
-    // /resume re-enters this function and must not stack hooks.
+    // Panic hook: restore the terminal (raw mode, mouse reporting, alternate
+    // screen) BEFORE the default hook prints, or the panic text lands mid-frame
+    // in raw mode and smears across the status bar and input box (observed: a
+    // tool panic on a tokio worker corrupted the composer for the rest of the
+    // session). Installed once per process — /resume re-enters this function
+    // and must not stack hooks.
     static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
     PANIC_HOOK.call_once(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stderr(), LeaveAlternateScreen);
+            restore_after_panic(&mut io::stderr());
             default_hook(info);
         }));
     });
