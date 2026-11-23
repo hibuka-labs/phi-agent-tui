@@ -744,6 +744,12 @@ pub struct ShellSpec {
     /// only holds the path (charter): the layout under the product's data
     /// dir stays product policy.
     pub input_history: Option<PathBuf>,
+    /// Scroll-companion arrow suppression (opt-in): `true` drops the bare ↑/↓
+    /// some terminals (FinalShell on macOS) synthesize alongside wheel
+    /// events — one gesture, two input streams, and the arrow half flips
+    /// input history behind the user's back. `false` (default) passes every
+    /// key unchanged.
+    pub scroll_arrow_guard: bool,
     /// Workspace root (status bar, hit protocol, brand banner).
     pub workspace: PathBuf,
     /// Product name — status bar, LSP client info, path hints (identity

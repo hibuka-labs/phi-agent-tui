@@ -11,6 +11,7 @@ mod paste_images;
 mod pick;
 mod plan;
 mod queue_steering;
+mod scroll_guard;
 mod selection_menu;
 mod subagents;
 mod thinking;

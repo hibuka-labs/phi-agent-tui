@@ -38,6 +38,7 @@ pub mod interaction;
 pub mod picker;
 pub mod render;
 pub mod run;
+mod scroll_guard;
 pub mod session_state;
 pub mod shell;
 pub mod task_focus;

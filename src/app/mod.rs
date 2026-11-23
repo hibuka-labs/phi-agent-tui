@@ -426,6 +426,10 @@ pub struct App {
     /// Persistence behind the ring (`ShellSpec::input_history`): `None` =
     /// the ring lives for this session only.
     input_history_store: Option<crate::input_history::InputHistoryStore>,
+    /// Scroll-companion arrow suppression (`ShellSpec::scroll_arrow_guard`):
+    /// drops the bare ↑/↓ a terminal synthesizes alongside wheel events so
+    /// scrolling never flips input history. Off = every key passes.
+    pub(crate) scroll_guard: crate::scroll_guard::ScrollArrowGuard,
     /// Cancel-rescue arm (#6), `(echo_start, echo_end, text, images)`: the
     /// root submit's transcript echo span, the text itself, and the pasted
     /// screenshots that rode it. Armed by
@@ -678,6 +682,7 @@ impl App {
             rescued_last_turn: false,
             input_history: phi_tui::history::HistoryRing::new(),
             input_history_store: None,
+            scroll_guard: crate::scroll_guard::ScrollArrowGuard::default(),
             viewport: Viewport::new(),
             approval_queue: VecDeque::new(),
             ask_queue: VecDeque::new(),
@@ -738,6 +743,20 @@ impl App {
     /// Mount the product's vision probe (ShellSpec `vision`).
     pub fn set_vision(&mut self, probe: crate::shell::VisionProbe) {
         self.vision = Some(probe);
+    }
+
+    /// Arm the scroll-companion arrow guard (ShellSpec `scroll_arrow_guard`).
+    /// Products opt in; the default is every key passes unchanged.
+    pub fn set_scroll_arrow_guard(&mut self, enabled: bool) {
+        self.scroll_guard = crate::scroll_guard::ScrollArrowGuard::new(enabled);
+    }
+
+    /// Feed a drained input batch to the guard BEFORE dispatching it: the
+    /// wheel pre-scan is what makes companion-arrow suppression
+    /// order-independent (the terminal may lead with either stream). Called
+    /// once per input drain by the run loop.
+    pub fn note_input_batch(&mut self, batch: &[crossterm::event::Event]) {
+        self.scroll_guard.note_batch(batch, Instant::now());
     }
 
     /// What the product's vision probe says: `Some(false)` = the current model

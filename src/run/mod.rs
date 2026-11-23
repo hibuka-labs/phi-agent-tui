@@ -221,6 +221,7 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
         on_reopen,
         is_consent,
         vision,
+        scroll_arrow_guard,
         exit_dump: exit_dump_mode,
     } = spec;
     let ShellHandles {
@@ -499,6 +500,9 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
         // before the first key can reach it. Cloned: the loop rebuilds the
         // App per session restart and each build reloads.
         app.load_input_history(input_history.clone());
+        // Scroll-companion arrow guard (opt-in): the product arms it in the
+        // spec; the default stays every key passes.
+        app.set_scroll_arrow_guard(scroll_arrow_guard);
         app.set_skill_summaries(skill_summaries);
         app.set_background_registry(bg_registry.clone());
         if let Some(is_consent) = &is_consent {

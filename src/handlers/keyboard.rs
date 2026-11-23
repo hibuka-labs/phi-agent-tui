@@ -30,6 +30,16 @@ impl App {
     ) -> Option<Action> {
         use KeyCode::*;
 
+        // Scroll-companion suppression (opt-in): terminals that translate
+        // one wheel gesture into wheel events PLUS synthesized bare ↑/↓
+        // (FinalShell) would flip input history behind the user's back. The
+        // guard saw the whole batch in `note_input_batch`; a companion arrow
+        // is dropped right here so it has no effect at all. Alt+↑/↓ and
+        // every other key pass unchanged.
+        if self.scroll_guard.suppress(code, modifiers, Instant::now()) {
+            return None;
+        }
+
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let shift = modifiers.contains(KeyModifiers::SHIFT);
         let alt = modifiers.contains(KeyModifiers::ALT);

@@ -41,15 +41,26 @@ pub(super) async fn drain_input(
     // event at a time, so a fast scroll-wheel burst leaves the rest queued.
     // Without this loop, each leftover event waits an extra 2 ms poll cycle,
     // creating visible stutter on track-pad / inertial scrolling.
-    let mut crossterm_count: u32 = 0;
+    //
+    // Collect the batch before dispatching any of it: the scroll-companion
+    // guard must see the whole batch first (a synthesized ↑/↓ may lead its
+    // wheel event), and the `/resume` picker break below then drops the
+    // un-dispatched tail with the same "keys can at worst select an option"
+    // posture as the popup-open drain in pump.rs.
+    let mut batch = Vec::new();
+    while crossterm::event::poll(Duration::ZERO)? {
+        batch.push(crossterm::event::read()?);
+    }
+    let crossterm_count = batch.len() as u32;
     let mut has_scroll = false;
     let mut has_key = false;
     let mut has_mouse = false;
     let mut has_paste = false;
     let mut has_resize = false;
-    while crossterm::event::poll(Duration::ZERO)? {
-        let event = crossterm::event::read()?;
-        crossterm_count += 1;
+    // Pre-scan the batch for wheel activity BEFORE the first key dispatch:
+    // this is what makes companion-arrow suppression order-independent.
+    app.note_input_batch(&batch);
+    for event in batch {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 *dirty = true;
@@ -121,7 +132,12 @@ pub(super) async fn drain_input(
                                         update_tx,
                                     );
                                 }
-                                break;
+                                // Not a `break`: the rest of the batch still
+                                // belongs to the composer (a queued keystroke
+                                // must not vanish because an /upgrade landed
+                                // next to it in one drain). `continue` skips
+                                // the agent-send below for this event only.
+                                continue;
                             }
                             // Enter-boundary product rewrite (design
                             // §3): pending panel picks merge behind
