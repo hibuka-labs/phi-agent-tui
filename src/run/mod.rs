@@ -74,6 +74,7 @@ use super::shell::{
 };
 use crate::approval::ApprovalItem;
 use crate::interaction::{AskItem, PickItem};
+use crate::theme::ShellToken;
 
 /// A command from the TUI loop to the agent task.
 enum Cmd {
@@ -572,9 +573,10 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
         // Boot-time notices (clamp / binary shadows / code-road degrade and
         // friends, aggregated product-side before run()). Visible on the
         // first frame, never silent; pushed exactly once (a session switch
-        // does not replay it).
+        // does not replay it). Quiet chrome: the whole row paints grey so the
+        // notices inform without competing with the conversation.
         for notice in std::mem::take(&mut startup_notices) {
-            app.push_system(&format!("! {notice}"));
+            app.push_chrome_line(&format!("! {notice}"), ShellToken::Faint);
         }
 
         // Replay historical messages into the transcript so the user sees the
@@ -622,7 +624,7 @@ pub async fn run(spec: ShellSpec, agent: Arc<PhiAgent>, handles: ShellHandles) -
         // (fn+Up/Down = PgUp/PgDn) up front.
         if let Some(notice) = terminal_scroll_notice(std::env::var("TERM_PROGRAM").ok().as_deref())
         {
-            app.push_system(&notice);
+            app.push_chrome_line(&notice, ShellToken::Faint);
         }
 
         // Track user messages for title generation at the 10-message threshold.

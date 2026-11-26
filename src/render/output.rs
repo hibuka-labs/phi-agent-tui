@@ -148,7 +148,7 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
                     // else (state glyph + name + grey args).
                     let mut styled = tool_invocation_line(
                         &line.text,
-                        line.tool_state.unwrap_or(ToolState::Running),
+                        line.tool_state,
                         app.spinner_char(),
                         theme,
                     );
@@ -253,7 +253,8 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
                             // fold is otherwise indistinguishable from a
                             // dropped segment (discoverability of Ctrl+O).
                             let mut summary = format!(
-                                "thinking - {line_count} lines - ~{} tok",
+                                "thinking - {line_count} line{} - ~{} tokens (est)",
+                                if *line_count == 1 { "" } else { "s" },
                                 fmt_k(*char_count as u64 / 3)
                             );
                             if let Some(secs) = duration_secs {
@@ -290,12 +291,7 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
                     // answer whole, so the transcript, selection and copy are
                     // unaffected by which tier is on.
                     let meta = if kind == LineKind::Tool {
-                        tool_invocation_line(
-                            &line.text,
-                            line.tool_state.unwrap_or(ToolState::Running),
-                            app.spinner_char(),
-                            theme,
-                        )
+                        tool_invocation_line(&line.text, line.tool_state, app.spinner_char(), theme)
                     } else {
                         result_meta_line(&line.text, kind, theme)
                     };
@@ -339,7 +335,11 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     if fold.hidden > 0 {
                         // ASCII `...`: `…` is CJK-width-unsafe (render_tests.rs).
-                        let hint = format!("{FOLD_INDENT}... +{} lines", fold.hidden);
+                        let hint = format!(
+                            "{FOLD_INDENT}... +{} line{}",
+                            fold.hidden,
+                            if fold.hidden == 1 { "" } else { "s" }
+                        );
                         let mut styled = Line::from(Span::styled(
                             hint.clone(),
                             Style::default().fg(theme.faint),
@@ -378,12 +378,7 @@ pub(super) fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
             // a result row splits the connector from the answer — only these
             // two need anything fancier than "paint the whole line".
             let mut styled = if kind == LineKind::Tool {
-                tool_invocation_line(
-                    &line.text,
-                    line.tool_state.unwrap_or(ToolState::Running),
-                    app.spinner_char(),
-                    theme,
-                )
+                tool_invocation_line(&line.text, line.tool_state, app.spinner_char(), theme)
             } else if kind == LineKind::ToolResult {
                 result_meta_line(&line.text, kind, theme)
             } else if kind == LineKind::System && spans.is_empty() {

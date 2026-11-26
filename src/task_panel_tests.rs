@@ -627,6 +627,36 @@ fn panel_activity_column_shows_latest_tool() {
 }
 
 #[test]
+fn done_receipt_row_keeps_its_ledger_marker_and_never_spins() {
+    let mut app = App::new();
+    let mut state = mock_sub_agent("auth", SubAgentStatus::Running);
+    state.started_at = Instant::now() - Duration::from_secs(65);
+    app.sub_agents.insert("root/auth".to_string(), state);
+    app.mark_sub_agent_finished("root/auth", SubAgentStatus::Done);
+
+    let snap = crate::render::snapshot_text(&mut app, 100, 30);
+    // The receipt row is a permanent ledger marker, grep-able after the panel
+    // row is swept: its `*` is content, not a state-glyph slot. A done row
+    // wearing the braille spinner is a display bug (live 20261126: every
+    // `done (…)` receipt spun forever because a `tool_state: None` marker
+    // row fell into the live-call glyph path).
+    let row = snap
+        .lines()
+        .find(|l| l.contains("] done ("))
+        .expect("a done receipt row");
+    assert!(
+        row.trim_start().starts_with("* [root/auth] done ("),
+        "the receipt must keep its ledger marker, got: {row:?}\n{snap}"
+    );
+    for frame in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"] {
+        assert!(
+            !row.contains(frame),
+            "a done receipt must not spin, got: {row:?}\n{snap}"
+        );
+    }
+}
+
+#[test]
 fn panel_columns_align_with_long_names() {
     let mut app = App::new();
     insert_agent_with_event(
@@ -643,17 +673,16 @@ fn panel_columns_align_with_long_names() {
     // #13 任务列宽: the name column widened to 28, so this 25-column name now
     // fits whole instead of being ellipsized at the old 16-column cap.
     assert!(snap.contains("analyze-deepseek-harness"), "got:\n{snap}");
-    // Both rows' column separators must sit at the same character position.
+    // Both rows' files column must start at the same character position. The
+    // columns are separated by whitespace alone (规则线不入列), so the anchor
+    // is the cell's own text — same isolation, no rule characters.
     let cols: Vec<usize> = snap
         .lines()
         .filter(|l| l.contains("analyze-deepseek-harness") || l.contains(" pi "))
-        .filter_map(|l| l.find('│'))
+        .filter_map(|l| l.find("1 file"))
         .collect();
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");
-    assert_eq!(
-        cols[0], cols[1],
-        "column separators must align, got:\n{snap}"
-    );
+    assert_eq!(cols[0], cols[1], "columns must align, got:\n{snap}");
 }
 
 #[test]
@@ -673,28 +702,94 @@ fn panel_columns_align_across_cjk_and_ascii_names() {
     app.task_panel.frame_open = true;
 
     let snap = crate::render::snapshot_text(&mut app, 100, 30);
-    // Both rows' `│` (the name/files separator) must sit on the same DISPLAY
-    // column. Comparing char indices would hide the misalignment, so measure
-    // the display width of the prefix before the first `│`.
-    // #3 任务面板框只留上边框: the frame no longer draws a left border, so the
-    // first `│` in a row IS the name/files separator — there is no panel
-    // border to mistake for it.
+    // Both rows' files column must sit on the same DISPLAY column. Comparing
+    // char indices would hide the misalignment, so measure the display width
+    // of the prefix before the cell's text. The columns are separated by
+    // whitespace alone (规则线不入列) — the anchor is the cell text, not a
+    // rule character.
     let cols: Vec<usize> = snap
         .lines()
         .filter(|l| l.contains("read_file"))
         .filter_map(|l| {
-            let idx = l.find('│')?;
+            let idx = l.find("1 file")?;
             Some(unicode_width::UnicodeWidthStr::width(&l[..idx]))
         })
         .collect();
     assert_eq!(cols.len(), 2, "both panel rows expected, got:\n{snap}");
     assert!(
         cols.iter().all(|&c| c > 1),
-        "measured the border, not the column separator: {cols:?}\n{snap}"
+        "measured the name column, not the files column: {cols:?}\n{snap}"
     );
     assert_eq!(
         cols[0], cols[1],
-        "column separators must align in display columns, got:\n{snap}"
+        "columns must align in display columns, got:\n{snap}"
+    );
+}
+
+// ── Rule-free columns + flanked title (20261126 UX batch) ────────────────────
+
+#[test]
+fn panel_columns_carry_no_rule_characters() {
+    let mut app = App::new();
+    insert_agent_with_event(&mut app, "root/auth", "auth", "read_file", false);
+    app.task_panel.frame_open = true;
+
+    let snap = crate::render::snapshot_text(&mut app, 100, 30);
+    // 规则线不入列: the columns are held apart by whitespace and their own
+    // padding — a `│` on a task row would be content the layout invented.
+    let rows: Vec<&str> = snap.lines().filter(|l| l.contains("auth")).collect();
+    assert!(!rows.is_empty(), "a task row expected:\n{snap}");
+    for row in &rows {
+        assert!(
+            !row.contains('│'),
+            "task rows must be rule-free: {row:?}\n{snap}"
+        );
+    }
+}
+
+#[test]
+fn panel_title_and_hint_ride_the_rule_flanked() {
+    let mut app = App::new();
+    insert_agent_with_event(&mut app, "root/auth", "auth", "read_file", false);
+    app.task_panel.frame_open = true;
+
+    let snap = crate::render::snapshot_text(&mut app, 100, 30);
+    let rule = snap
+        .lines()
+        .find(|l| l.contains("Tasks (1)"))
+        .unwrap_or_else(|| panic!("the title must ride the top rule:\n{snap}"));
+    // 横条夹字，不顶两端: each label is flanked by rule stubs and inset from
+    // the panel's endpoints — `─ Tasks (1) ───…── ^T close ─`.
+    assert!(
+        rule.trim_start().starts_with("─ Tasks (1)"),
+        "the title needs a rule stub before it: {rule:?}\n{snap}"
+    );
+    assert!(
+        rule.trim_end().ends_with("^T close ─"),
+        "the close hint needs a rule stub after it: {rule:?}\n{snap}"
+    );
+}
+
+#[test]
+fn panel_columns_spread_with_the_frame_width() {
+    let mut app = App::new();
+    insert_agent_with_event(&mut app, "root/auth", "auth", "read_file", false);
+    app.task_panel.frame_open = true;
+
+    // 列随框走: the gap between columns widens with the frame, so a wide
+    // panel does not read as one left-packed clump.
+    let mut files_col = |width: u16| -> usize {
+        let snap = crate::render::snapshot_text(&mut app, width, 30);
+        snap.lines()
+            .find(|l| l.contains("auth"))
+            .and_then(|l| l.find("1 file"))
+            .unwrap_or_else(|| panic!("files cell expected at {width} cols:\n{snap}"))
+    };
+    let narrow = files_col(70);
+    let wide = files_col(150);
+    assert!(
+        wide > narrow,
+        "the files column must move right with the frame: narrow {narrow}, wide {wide}"
     );
 }
 

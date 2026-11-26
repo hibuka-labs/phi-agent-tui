@@ -434,6 +434,42 @@ fn banner_spans_render_literal_colors_on_top_of_system_style() {
 }
 
 #[test]
+fn chrome_rows_paint_at_the_quiet_grey_on_the_glass() {
+    // The quiet-chrome face reaches the glass, cell by cell: a
+    // `push_chrome_line` row (boot notice, terminal note, the turn verdict)
+    // resolves to the theme's faint grey across the whole row — head, middle
+    // and tail alike — while a plain command answer stays on the muted System
+    // base. fails_when: the notice paints at the System base again (the
+    // pre-fix bright look) or any slice of it drifts off the grey.
+    let backend = TestBackend::new(90, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut app = App::new();
+    let theme = app.theme();
+    app.push_chrome_line(
+        "! model pointer in force: MiniMax-M3.1-Flash (config.json `model` overrides `main`)",
+        ShellToken::Faint,
+    );
+    app.push_system("plugin commands:");
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    for needle in ["! model pointer", "`model` overrides", "`main`)"] {
+        let style = cell_style_for(buf, 90, needle).expect("chrome row on screen");
+        assert_eq!(
+            style.fg,
+            Some(theme.faint),
+            "chrome row must paint grey at {needle:?}"
+        );
+    }
+    // The command answer keeps the muted System base.
+    let style = cell_style_for(buf, 90, "plugin commands:").expect("answer row on screen");
+    assert_eq!(
+        style.fg,
+        Some(theme.muted),
+        "command answer must stay on the System base"
+    );
+}
+
+#[test]
 fn snapshot_shows_diff_block() {
     let mut app = App::new();
     let args = serde_json::json!({

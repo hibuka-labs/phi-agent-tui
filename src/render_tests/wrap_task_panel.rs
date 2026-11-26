@@ -2,7 +2,7 @@
 
 use super::super::*;
 use crate::app::TuiEvent;
-use crate::theme::BrandRow;
+use crate::theme::{BrandRow, ShellToken};
 use phi_agent::{RuntimeEvent, SessionId};
 
 // ── Task panel column accounting ─────────────────────────────────────────────
@@ -114,6 +114,22 @@ fn styled_banner_rows_stay_whole_and_do_not_soft_wrap() {
         wordmark_rows, 5,
         "wordmark must stay whole (5 rows), not split at letter gaps:\n{snap}"
     );
+}
+
+/// The opposite contract on quiet-chrome rows (boot notices, terminal notes,
+/// the turn verdict): they are prose, not art — they must soft-wrap at the
+/// pane width and never clip their tail. The scroll notice runs 89 columns
+/// and its actionable tail sits at the end; the row keeps `original`, so the
+/// renderer wraps it at display width.
+#[test]
+fn chrome_notice_rows_soft_wrap_and_never_clip() {
+    let mut app = App::new();
+    let long = "Note: wheel/trackpad scroll needs View > Allow Mouse Reporting - fn+Up/fn+Down page history";
+    app.push_chrome_line(long, ShellToken::Faint);
+    let snap = snapshot_text(&mut app, 40, 30);
+    for needle in ["Note:", "Reporting", "history"] {
+        assert!(snap.contains(needle), "{needle} clipped:\n{snap}");
+    }
 }
 
 #[test]

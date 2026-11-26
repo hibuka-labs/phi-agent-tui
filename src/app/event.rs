@@ -65,10 +65,20 @@ impl App {
             TuiEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                total_tokens,
             } => {
                 self.tokens_in += input_tokens;
                 self.tokens_out += output_tokens;
                 self.turn_tokens += input_tokens + output_tokens;
+                // Window = what the provider measured this call. Prefer its
+                // own total: on the OpenAI protocol `prompt_tokens` already
+                // includes the cached slice, so field-summing would count it
+                // twice; a provider without totals is the Anthropic shape,
+                // where the fields are disjoint and their sum is exact.
+                self.window_tokens = total_tokens.unwrap_or_else(|| {
+                    input_tokens + cache_read_tokens.unwrap_or(0) + output_tokens
+                });
             }
             // T12: degrade reports are consumed by the run loop (it owns the
             // frame flipbook mark); a direct feed here only logs.
@@ -118,6 +128,29 @@ impl App {
                 tool_state: None,
             });
         }
+    }
+
+    /// A settled-fact row in the quiet chrome voice: the turn-final verdict, a
+    /// boot notice, a terminal note. The whole row carries one style run
+    /// ([`ShellToken::Faint`] for quiet info, the subdued [`ShellToken::Error`]
+    /// for a failed turn's marker) so it paints at the theme's chrome slot and
+    /// never competes with the conversation. The row keeps `original`, so it
+    /// soft-wraps at the pane width like prose — the opposite of
+    /// `push_styled_line`'s fixed-width banner art, which must stay whole and
+    /// clips instead.
+    pub(crate) fn push_chrome_line(&mut self, text: &str, style: ShellToken) {
+        self.transcript.push(OutputLine {
+            spans: Some(vec![SpanSpec {
+                start: 0,
+                len: text.len(),
+                style,
+            }]),
+            original: Some(text.to_string()),
+            detail: None,
+            text: text.to_string(),
+            kind: LineKind::System,
+            tool_state: None,
+        });
     }
 
     /// Common end-of-turn settlement. If sub-agents or *bounded* background
@@ -177,7 +210,7 @@ impl App {
                 // Token readout omitted when the turn never reached the model
                 // (`0` usage), so command-only turns keep the bare format.
                 let tok = if sum.tokens > 0 {
-                    format!(" - {} tok", fmt_k(sum.tokens))
+                    format!(" - {} tokens", fmt_k(sum.tokens))
                 } else {
                     String::new()
                 };
@@ -190,18 +223,15 @@ impl App {
                 )
             });
             if let Some(text) = line {
-                // Grey verdict; the failure marker is the theme's subdued
-                // `error` slot so it reads as a verdict, not a live error line.
-                let spans = if end == TurnEnd::Error {
-                    vec![SpanSpec {
-                        start: 0,
-                        len: text.len(),
-                        style: ShellToken::Error,
-                    }]
+                // Grey verdict — one quiet-chrome run over the whole row; the
+                // failure marker takes the theme's subdued `error` slot so it
+                // reads as a verdict, not a live error line.
+                let style = if end == TurnEnd::Error {
+                    ShellToken::Error
                 } else {
-                    Vec::new()
+                    ShellToken::Faint
                 };
-                self.transcript.push_styled_line(text, spans);
+                self.push_chrome_line(&text, style);
             }
         }
         // Daemon-only settlement: the agent IS done — say so plainly, then
@@ -543,9 +573,11 @@ impl App {
         }
     }
 
-    /// ` - 42s - 15.0k tok`-style readout for the active stretch: elapsed
+    /// ` - 42s - 87.3k tokens`-style readout for the active stretch: elapsed
     /// time (rounded up so a just-started stretch doesn't read as "0s") plus
-    /// the session's cumulative token usage. Empty when idle and no usage
+    /// the *window* — what the provider measured the context at on the last
+    /// model call. The number that decides when rotation/compaction nears;
+    /// the session burn lives in the exit dump. Empty when idle and no usage
     /// has arrived. ASCII separators only: `·` renders double-width in CJK
     /// fonts (render_tests CJK width guard).
     pub(crate) fn activity_suffix(&self) -> String {
@@ -553,9 +585,8 @@ impl App {
             Some(t) => format!(" - {}", Self::fmt_elapsed(t.elapsed().as_secs() + 1)),
             None => String::new(),
         };
-        let total = self.tokens_in + self.tokens_out;
-        if total > 0 {
-            suffix.push_str(&format!(" - {} tok", fmt_k(total)));
+        if self.window_tokens > 0 {
+            suffix.push_str(&format!(" - {} tokens", fmt_k(self.window_tokens)));
         }
         suffix
     }

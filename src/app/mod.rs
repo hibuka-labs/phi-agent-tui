@@ -349,13 +349,22 @@ pub enum TuiEvent {
         items: Vec<TipItem>,
     },
     /// Real LLM token usage for one model call, forwarded from the agent
-    /// task's `on_turn_end` hook. Accumulated into the status bar's token
-    /// readout and the turn-final status line.
+    /// task's `on_turn_end` hook. Feeds the status bar's window readout and
+    /// the turn-final status line.
     Usage {
-        /// Prompt/input tokens of the call.
+        /// Prompt/input tokens of the call (cache-served portion excluded on
+        /// the Anthropic protocol, included on OpenAI's — see `total_tokens`).
         input_tokens: u64,
         /// Completion/output tokens of the call (thinking included).
         output_tokens: u64,
+        /// Prompt tokens served from the provider's prefix cache. `None`
+        /// when the provider does not report cache accounting.
+        cache_read_tokens: Option<u64>,
+        /// Provider-reported total for the call. Prefixed over the
+        /// per-field sum when present: on the OpenAI protocol
+        /// `prompt_tokens` already includes the cached slice, so summing
+        /// fields would double-count it.
+        total_tokens: Option<u64>,
     },
     /// A product hook degraded to its fallback (T12 triage), reported from a
     /// task that cannot reach the frame flipbook (the agent loop). The run
@@ -616,9 +625,14 @@ pub struct App {
     /// Idle stretch greets the next tip. Always `< tips.len()` when non-empty.
     pub(crate) tip_index: usize,
     /// Session-cumulative real LLM token usage (prompt/completion), fed by
-    /// `TuiEvent::Usage`. Rendered in the status bar's activity suffix.
+    /// `TuiEvent::Usage`. Accounting only — the exit dump reprints it; the
+    /// live status bar shows the window, not the burn.
     pub(crate) tokens_in: u64,
     pub(crate) tokens_out: u64,
+    /// Tokens the provider counted for the *latest* model call — the window
+    /// as measured at the provider, updated per call. Not a local estimate:
+    /// `total_tokens` when the provider reports one, else the field sum.
+    pub(crate) window_tokens: u64,
     /// Tokens consumed by the current activity stretch; reset when a new
     /// stretch begins and snapshotted into `LastTurnSummary`.
     pub(crate) turn_tokens: u64,
@@ -731,6 +745,7 @@ impl App {
             tip_index: 0,
             tokens_in: 0,
             tokens_out: 0,
+            window_tokens: 0,
             turn_tokens: 0,
         }
     }

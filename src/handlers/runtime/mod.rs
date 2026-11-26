@@ -13,8 +13,8 @@ mod tool_text;
 
 pub(crate) use tool_text::agent_prefix;
 use tool_text::{
-    bg_start_result_label, build_tool_detail, notice_line, settle_tool_call, spawn_result_label,
-    tool_invocation_text,
+    bg_start_result_label, build_tool_detail, notice_line, result_head_label, settle_tool_call,
+    spawn_result_label, tool_invocation_text,
 };
 
 use std::time::Instant;
@@ -179,8 +179,8 @@ impl App {
                 if tool_name != "update_plan" {
                     // For payload tools, attach the structured block (edit diff /
                     // written content / spawn brief) the ladder expands below
-                    // this line.
-                    let detail = build_tool_detail(&tool_name, &args_json);
+                    // this line. `body` goes first: the command fold needs to
+                    // know whether the row kept the command whole.
                     let body = tool_invocation_text(
                         &tool_name,
                         &args_json,
@@ -188,6 +188,7 @@ impl App {
                         self.transcript.wrap_width(),
                         &self.workspace_root,
                     );
+                    let detail = build_tool_detail(&tool_name, &args_json, &body);
                     // The `*` is a marker slot, not a glyph: the renderer draws
                     // the state glyph over it (braille while running, `o`/`x`
                     // when settled). Keeping a stable placeholder means the
@@ -249,12 +250,17 @@ impl App {
                     ToolState::Done
                 };
                 let is_child = matches!(agent_id.as_deref(), Some(id) if !id.is_empty());
-                let adjacent = if is_child {
+                let same_block = if is_child {
                     let id = agent_id.as_deref().unwrap_or_default().to_string();
                     let output = self.sub_agent_transcripts.entry(id).or_default();
-                    settle_tool_call(output, settled, details.as_ref())
+                    settle_tool_call(output, settled, details.as_ref(), &tool_name)
                 } else {
-                    settle_tool_call(&mut self.transcript.output, settled, details.as_ref())
+                    settle_tool_call(
+                        &mut self.transcript.output,
+                        settled,
+                        details.as_ref(),
+                        &tool_name,
+                    )
                 };
 
                 // `update_plan` renders as a plan block (see `PlanUpdated`), so its
@@ -276,7 +282,7 @@ impl App {
                         // task id) and the raw result rides the fold — the
                         // tool's own wording and payload stay one keypress
                         // away, and `summary` is never rewritten.
-                        let body = if adjacent {
+                        let body = if same_block {
                             label
                         } else {
                             format!("{tool_name}  {label}")
@@ -308,7 +314,17 @@ impl App {
                         // `raw` keeps all of it — squashing the whole answer up
                         // here would leak past every tier and break the ladder.
                         let head = raw.lines().next().unwrap_or("");
-                        let s = one_line(head, max_cols);
+                        let s = match result_head_label(head) {
+                            // A status envelope's head is machine shorthand
+                            // (`[Command Failed (exit code: 1)]`); the meta row
+                            // projects it to a human label (`failed (exit 1)`)
+                            // while `raw` keeps the envelope whole. The label
+                            // stands in for the head exactly like an
+                            // abbreviation does, so the full-expansion restore
+                            // below pays back the literal head.
+                            Some(label) => label,
+                            None => one_line(head, max_cols),
+                        };
                         // The meta row *is* the answer's head (`  < head`),
                         // abbreviated to the line budget — record which, so
                         // the ladder neither draws the head twice nor loses
@@ -318,17 +334,17 @@ impl App {
                         } else {
                             MetaHead::Abbreviated
                         };
-                        // When the result sits directly under its own call the
-                        // tool name is already on the line above — repeating it
-                        // is chrome, not content. Out-of-order (parallel) results
+                        // When the result sits in its call's block the tool
+                        // name is already on the line above — repeating it is
+                        // chrome, not content. Far (prose-separated) results
                         // carry the name so the attachment stays readable.
                         let body = if s.is_empty() {
-                            if adjacent {
+                            if same_block {
                                 String::new()
                             } else {
                                 tool_name.clone()
                             }
-                        } else if adjacent {
+                        } else if same_block {
                             s
                         } else {
                             format!("{tool_name}  {s}")

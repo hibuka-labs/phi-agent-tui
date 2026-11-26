@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::common::*;
+use crate::theme::ShellToken;
 use phi_agent::SessionId;
 use phi_tui::lines::{LineDetail, MetaHead};
 
@@ -302,10 +303,10 @@ fn activity_suffix_formats_minutes_and_tokens() {
     let mut app = App::new();
     app.activity_since = Some(Instant::now() - std::time::Duration::from_secs(91));
     assert_eq!(app.activity_suffix(), " - 1m32s");
-    // Session-cumulative usage rides along once any usage arrives.
-    app.tokens_in = 12_000;
-    app.tokens_out = 3_000;
-    assert_eq!(app.activity_suffix(), " - 1m32s - 15.0k tok");
+    // The window (provider-measured) rides along once any usage arrives —
+    // not the session burn.
+    app.window_tokens = 87_300;
+    assert_eq!(app.activity_suffix(), " - 1m32s - 87.3k tokens");
 }
 
 #[test]
@@ -316,29 +317,43 @@ fn usage_events_feed_status_and_turn_summary_tokens() {
         phase: Phase::Thinking,
     };
     app.begin_activity();
+    // OpenAI shape: `prompt_tokens` includes the cached slice and the
+    // provider reports a total — the total is the window, no double count.
     app.handle_event(TuiEvent::Usage {
         input_tokens: 12_000,
         output_tokens: 300,
-    });
-    app.handle_event(TuiEvent::Usage {
-        input_tokens: 500,
-        output_tokens: 2_200,
+        cache_read_tokens: Some(9_000),
+        total_tokens: Some(12_300),
     });
     let line = app.status_line();
     assert!(
-        line.contains(" - 15.0k tok"),
-        "status shows session token total, got: {line}"
+        line.contains(" - 12.3k tokens"),
+        "status shows the provider's window total, got: {line}"
+    );
+
+    // Anthropic shape: no total; the fields are disjoint and sum exactly.
+    app.handle_event(TuiEvent::Usage {
+        input_tokens: 500,
+        output_tokens: 2_200,
+        cache_read_tokens: Some(9_800),
+        total_tokens: None,
+    });
+    let line = app.status_line();
+    assert!(
+        line.contains(" - 12.5k tokens"),
+        "status shows the summed window when no total is reported, got: {line}"
     );
 
     app.handle_event(TuiEvent::TurnDone);
     let last = app.transcript.output.last().expect("turn-final line");
     assert!(
-        last.text.starts_with("crunched for ") && last.text.contains(" - 15.0k tok - done"),
+        last.text.starts_with("crunched for ") && last.text.contains(" - 15.0k tokens - done"),
         "turn-final line reports the stretch's tokens, got: {}",
         last.text
     );
 
-    // The next stretch restarts the turn tally but keeps the session total.
+    // The next stretch restarts the turn tally; the window stays the last
+    // measurement until the next model call refreshes it.
     app.running = true;
     app.status = AgentStatus::Running {
         phase: Phase::Thinking,
@@ -347,17 +362,59 @@ fn usage_events_feed_status_and_turn_summary_tokens() {
     app.handle_event(TuiEvent::Usage {
         input_tokens: 400,
         output_tokens: 100,
+        cache_read_tokens: None,
+        total_tokens: None,
     });
     let line = app.status_line();
     assert!(
-        line.contains(" - 15.5k tok"),
-        "status keeps the session total, got: {line}"
+        line.contains(" - 500 tokens"),
+        "status shows the new call's window, got: {line}"
     );
     app.handle_event(TuiEvent::TurnDone);
     let last = app.transcript.output.last().expect("turn-final line");
     assert!(
-        last.text.contains(" - 500 tok - done"),
+        last.text.contains(" - 500 tokens - done"),
         "turn-final line reports only the new stretch, got: {}",
         last.text
     );
+}
+
+#[test]
+fn turn_verdict_rows_wear_the_quiet_chrome_face() {
+    // The `crunched …` row is a settled fact, not conversation: the whole row
+    // carries one quiet-chrome run (`ShellToken::Faint`) so it paints at the
+    // theme's grey, and a failed turn's marker takes the subdued error slot.
+    // fails_when: the verdict row loses its run (renders at the System base
+    // again) or the error verdict goes grey.
+    let mut app = App::new();
+    app.running = true;
+    app.status = AgentStatus::Running {
+        phase: Phase::Thinking,
+    };
+    app.begin_activity();
+    app.handle_event(TuiEvent::TurnDone);
+    let row = app.transcript.output.last().expect("verdict row");
+    assert!(row.text.starts_with("crunched for "), "{}", row.text);
+    let spans = row
+        .spans
+        .as_deref()
+        .expect("verdict row carries its style run");
+    assert_eq!(spans.len(), 1, "one full-row run, got {spans:?}");
+    assert_eq!(spans[0].start, 0);
+    assert_eq!(spans[0].len, row.text.len());
+    assert_eq!(spans[0].style, ShellToken::Faint);
+
+    // The failure marker keeps the subdued error slot, same full-row shape.
+    let mut app = App::new();
+    app.running = true;
+    app.status = AgentStatus::Running {
+        phase: Phase::Thinking,
+    };
+    app.begin_activity();
+    app.handle_event(TuiEvent::TurnError("boom".into()));
+    let row = app.transcript.output.last().expect("error verdict row");
+    assert!(row.text.starts_with("crunched for "), "{}", row.text);
+    let spans = row.spans.as_deref().expect("style run");
+    assert_eq!(spans.len(), 1, "one full-row run, got {spans:?}");
+    assert_eq!(spans[0].style, ShellToken::Error);
 }

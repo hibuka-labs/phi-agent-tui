@@ -11,9 +11,11 @@
 //!
 //! - **The committed transcript, not the chrome.** Status bar, composer and
 //!   spinners live only on the alt-screen and are gone for good; the rows
-//!   re-printed here are the same settled text the viewport showed. Banner
-//!   art (styled runs, the wordmark) is skipped — the replay has its own
-//!   header rule and 58 columns of `█` are noise in a scrollback.
+//!   re-printed here are the same settled text the viewport showed. Banner art
+//!   (fixed-width styled runs, the wordmark) is skipped — the replay has its
+//!   own header rule and 58 columns of `█` are noise in a scrollback — while
+//!   styled prose (the grey verdict and notice rows) prints like any other
+//!   row.
 //! - **Folded payloads are expanded.** A tool result commits as a one-line
 //!   meta row with the full answer in `LineDetail::Folded.raw`; the replay
 //!   prints the payload under it so the output stays copyable after exit.
@@ -136,7 +138,7 @@ pub fn replay_to_stdout(
 
 /// The session header line. The wording is product copy —
 /// [`CopyTable::exit_dump_header`] — whose default reads
-/// `── phimint 0.4.1 · session X · 3 turns · 12.4k tok ──`.
+/// `── phimint 0.4.1 · session X · 3 turns · 12.4k tokens ──`.
 fn header_row(copy: &CopyTable, facts: &SessionFacts<'_>) -> String {
     (copy.exit_dump_header)(facts)
 }
@@ -150,9 +152,12 @@ fn footer_row(copy: &CopyTable, facts: &SessionFacts<'_>) -> String {
 
 /// Append one committed line and, for folds, the payload it summarizes.
 fn line_rows(out: &mut Vec<String>, line: &OutputLine<ShellToken>) {
-    // Banner rows are the only styled runs in the transcript; the wordmark is
-    // alt-screen chrome and does not belong in the scrollback.
-    if line.spans.is_some() {
+    // Fixed-width banner art (a styled run carrying no `original`) is
+    // alt-screen chrome and does not belong in the scrollback. Styled PROSE —
+    // the quiet-chrome verdict and notice rows — is settled text the viewport
+    // showed and prints here like any other row, style-blind. Same seam as the
+    // renderer's wrap exemption (`spans` + no `original` = fixed art).
+    if line.spans.is_some() && line.original.is_none() {
         return;
     }
     out.push(line.text.clone());
@@ -283,7 +288,7 @@ mod tests {
         );
         assert_eq!(
             rows[0],
-            "── phimint 0.4.1 · session 20261014_test · 3 turns · 12.4k tok ──"
+            "── phimint 0.4.1 · session 20261014_test · 3 turns · 12.4k tokens ──"
         );
         assert_eq!(rows[1], "");
         assert!(rows.contains(&"> ping".to_string()));
@@ -297,7 +302,7 @@ mod tests {
     #[test]
     fn banner_rows_are_skipped() {
         let mut art = line(LineKind::Normal, "██████  ██");
-        art.spans = Some(Vec::new()); // styled run == banner art
+        art.spans = Some(Vec::new()); // styled run with no `original` == banner art
         let rows = render_one(
             ExitDumpMode::Full,
             vec![art, line(LineKind::Normal, "after")],
@@ -307,6 +312,30 @@ mod tests {
             "banner art leaked into the replay: {rows:?}"
         );
         assert!(rows.contains(&"after".to_string()));
+    }
+
+    #[test]
+    fn styled_prose_rows_print_style_blind() {
+        // The quiet-chrome verdict/notice rows carry a styled run but are
+        // prose the viewport showed — the replay prints their text like any
+        // other row. Only fixed banner art (a styled run with no `original`)
+        // stays out.
+        let mut notice = line(LineKind::System, "! model pointer in force: MiniMax");
+        notice.spans = Some(vec![crate::theme::SpanSpec {
+            start: 0,
+            len: notice.text.len(),
+            style: ShellToken::Faint,
+        }]);
+        notice.original = Some(notice.text.clone());
+        let rows = render_one(
+            ExitDumpMode::Full,
+            vec![notice, line(LineKind::Normal, "after")],
+        );
+        assert!(
+            rows.contains(&"! model pointer in force: MiniMax".to_string()),
+            "chrome prose must reach the scrollback: {rows:?}"
+        );
+        assert!(rows.contains(&"after".to_string()), "{rows:?}");
     }
 
     #[test]
@@ -457,7 +486,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "── phimint 0.4.1 · session 20261014_test · 3 turns · 12.4k tok ──".to_string(),
+                "── phimint 0.4.1 · session 20261014_test · 3 turns · 12.4k tokens ──".to_string(),
                 String::new(),
                 "It is 4.".to_string(),
                 "Done.".to_string(),

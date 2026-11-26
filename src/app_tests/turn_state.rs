@@ -4,6 +4,7 @@ use super::super::*;
 use super::common::*;
 use phi_agent::SessionId;
 use phi_agent::UserEvent;
+use phi_tui::lines::ToolState;
 
 #[test]
 fn status_tracks_state_machine() {
@@ -385,7 +386,7 @@ fn tool_args_drop_schema_default_noise() {
     assert_eq!(
         texts,
         vec![
-            "* execute_command  command=cargo build",
+            "* execute_command  cargo build",
             "* list_files",
             "* read_file  main.rs",
         ]
@@ -422,12 +423,151 @@ fn tool_args_keep_non_default_choices() {
     assert_eq!(
         texts,
         vec![
-            "* execute_command  background=true  command=npm run dev  timeout_ms=300000",
-            "* execute_command  background=true  command=vite",
-            "* list_files  limit=50  src  recursive=true",
+            "* execute_command  npm run dev  background  timeout=5m",
+            "* execute_command  vite  background",
+            "* list_files  limit=50  src  recursive",
             "* read_file  main.rs from L11 to L60",
         ]
     );
+}
+
+#[test]
+fn tool_args_humanize_durations_and_flags() {
+    let mut app = App::new();
+    // Durations speak the unit a human would say; set flags are the bare
+    // adjective they are.
+    app.handle_event(TuiEvent::Runtime(tool_started_with(
+        "task_output",
+        r#"{"task_id":"bg_84bb8d8c","timeout_ms":180000,"wait":true}"#,
+    )));
+    // Sub-minute and odd milliseconds keep the honest `ms`/`s` spelling.
+    app.handle_event(TuiEvent::Runtime(tool_started_with(
+        "task_output",
+        r#"{"task_id":"bg_1","timeout_ms":12000}"#,
+    )));
+    app.handle_event(TuiEvent::Runtime(tool_started_with(
+        "task_output",
+        r#"{"task_id":"bg_2","timeout_ms":500}"#,
+    )));
+    let texts: Vec<&str> = app
+        .transcript
+        .output
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "* task_output  bg_84bb8d8c  timeout=3m  wait",
+            "* task_output  bg_1  timeout=12s",
+            "* task_output  bg_2  timeout=500ms",
+        ]
+    );
+}
+
+#[test]
+fn result_head_projects_status_envelopes() {
+    let mut app = App::new();
+    // The envelope head is machine shorthand; the meta row spells it out.
+    app.handle_event(TuiEvent::Runtime(tool_started("execute_command")));
+    app.handle_event(TuiEvent::Runtime(tool_finished_with_summary(
+        "execute_command",
+        "[Command Failed (exit code: 1)]\ncommand: false\nstdout:\n(empty)",
+    )));
+    app.handle_event(TuiEvent::Runtime(tool_started("execute_command")));
+    app.handle_event(TuiEvent::Runtime(tool_finished_with_summary(
+        "execute_command",
+        "[Command Timed Out after 12000ms]\ncommand: sleep 5",
+    )));
+    let texts: Vec<&str> = app
+        .transcript
+        .output
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "* execute_command",
+            "  < failed (exit 1)",
+            "* execute_command",
+            "  < timed out (12s)",
+        ]
+    );
+}
+
+#[test]
+fn result_drops_name_inside_the_call_block() {
+    let mut app = App::new();
+    // Under its own call the tool name is on the row above — chrome.
+    app.handle_event(TuiEvent::Runtime(tool_started("read_file")));
+    app.handle_event(TuiEvent::Runtime(tool_finished_with_summary(
+        "read_file",
+        "file body",
+    )));
+    // Far from its call (prose landed between) the name earns its columns.
+    app.handle_event(TuiEvent::Runtime(tool_started("read_file")));
+    app.handle_event(TuiEvent::Runtime(text("a comment")));
+    app.flush_pending();
+    app.handle_event(TuiEvent::Runtime(tool_finished_with_summary(
+        "read_file",
+        "file body",
+    )));
+    let texts: Vec<&str> = app
+        .transcript
+        .output
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "* read_file",
+            "  < file body",
+            "* read_file",
+            "a comment",
+            "  < read_file  file body",
+        ]
+    );
+}
+
+#[test]
+fn parallel_settle_pairs_by_tool_name() {
+    let mut app = App::new();
+    // Two calls in flight at once. The first to finish must settle its OWN
+    // row: name-matched pairing, not "last running row" — that heuristic
+    // crossed the state glyphs and the name decision (feed.xml/task_output
+    // inversion).
+    app.handle_event(TuiEvent::Runtime(tool_started_with(
+        "execute_command",
+        r#"{"command":"echo feed"}"#,
+    )));
+    app.handle_event(TuiEvent::Runtime(tool_started_with(
+        "task_output",
+        r#"{"task_id":"bg_1"}"#,
+    )));
+    app.handle_event(TuiEvent::Runtime(tool_finished_with_summary(
+        "execute_command",
+        "feed.xml content",
+    )));
+    let (exec_state, task_state) = (
+        app.transcript.output[0].tool_state,
+        app.transcript.output[1].tool_state,
+    );
+    assert_eq!(
+        exec_state,
+        Some(ToolState::Done),
+        "first finisher settles its own row"
+    );
+    assert_eq!(
+        task_state,
+        Some(ToolState::Running),
+        "sibling call is untouched"
+    );
+    // In the same call block the sibling result keeps its name — the rows
+    // below the block are interleaved, the name is the only attribution.
+    let last = app.transcript.output.last().unwrap();
+    assert_eq!(last.text, "  < execute_command  feed.xml content");
 }
 
 #[test]

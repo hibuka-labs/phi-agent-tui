@@ -119,7 +119,7 @@ fn tool_result_rides_the_preview_ladder() {
     let text = snapshot_text(&mut app, 80, 20);
     assert!(text.contains("alpha") && text.contains("beta"), "\n{text}");
     assert!(!text.contains("gamma"), "tail shown at default:\n{text}");
-    assert!(text.contains("... +1 lines"), "fold hint missing:\n{text}");
+    assert!(text.contains("... +1 line"), "fold hint missing:\n{text}");
 
     // Expanded: the whole answer, no hint.
     app.result_tier = ResultTier::Expanded;

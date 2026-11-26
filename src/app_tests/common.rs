@@ -54,6 +54,20 @@ pub(super) fn tool_finished(name: &str, denied: bool) -> RuntimeEvent {
     }
 }
 
+/// A finish whose summary is the tool's own answer (envelope, JSON, …) —
+/// the result row projects that head.
+pub(super) fn tool_finished_with_summary(name: &str, summary: &str) -> RuntimeEvent {
+    RuntimeEvent::ActionFinished {
+        session_id: SessionId::new(1),
+        tool_name: name.to_string(),
+        summary: summary.to_string(),
+        agent_id: None,
+        trace_id: None,
+        denied: false,
+        details: None,
+    }
+}
+
 pub(super) fn run_finished(agent_id: Option<&str>) -> RuntimeEvent {
     RuntimeEvent::RunFinished {
         session_id: SessionId::new(1),

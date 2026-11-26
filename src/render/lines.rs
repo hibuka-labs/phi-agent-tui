@@ -24,11 +24,14 @@ pub(super) fn style_for(kind: LineKind, theme: Theme) -> Style {
         // green actually means something.
         LineKind::ToolResult => Style::default().fg(theme.muted),
         LineKind::Error => Style::default().fg(Color::Red),
-        // System messages are the product talking back — command answers,
-        // notices, verdicts — content the user asked for or must see, so they
-        // read at the `muted` level (tool arguments, result bodies), not the
-        // `faint` chrome slot. The composition in [`system_info_line`] adds
-        // hue and label emphasis on top for the shapes worth scanning.
+        // System messages are the product talking back — command answers the
+        // user asked for — so they read at the `muted` level (tool arguments,
+        // result bodies). Settled chrome rows (the turn verdict, boot and
+        // terminal notices) are a different voice: they carry a full-row style
+        // run (`App::push_chrome_line`) and resolve to the quiet `faint` slot,
+        // so they never compete with the conversation. The composition in
+        // [`system_info_line`] adds hue and label emphasis on top for the
+        // shapes worth scanning.
         LineKind::System => Style::default().fg(theme.muted),
         // A cancel is a settled fact, not an alarm — the user asked for it.
         // Grey keeps red meaning "something broke" and the marker still
@@ -66,16 +69,28 @@ pub(super) fn tool_state_style(state: ToolState, theme: Theme) -> Style {
 
 /// A tool invocation line, composed rather than uniformly tinted.
 ///
-/// The `*` in `text` is a marker slot, not a glyph: it is replaced here by the
-/// call's state glyph (the braille frame while running, `o`/`x` once settled),
-/// so the row answers "did this finish?" without opening anything. Arguments
-/// drop to grey — the tool name is the identity, the values are detail.
+/// On a live call the `*` in `text` is a marker slot, not a glyph: it is
+/// replaced here by the call's state glyph (the braille frame while running,
+/// `o`/`x` once settled), so the row answers "did this finish?" without
+/// opening anything. Arguments drop to grey — the tool name is the identity,
+/// the values are detail.
+///
+/// `state: None` is not a live call — it is a *marker row* (the permanent
+/// `* [path] done (2m13s)` ledger, `⚙ name` replay rows): its leading glyph
+/// is content and the text renders verbatim, so the row stays grep-able and
+/// a finished row can never wear the running spinner.
 pub(super) fn tool_invocation_line(
     text: &str,
-    state: ToolState,
+    state: Option<ToolState>,
     spinner: &str,
     theme: Theme,
 ) -> Line<'static> {
+    let Some(state) = state else {
+        return Line::from(Span::styled(
+            text.to_string(),
+            style_for(LineKind::Tool, theme),
+        ));
+    };
     let body = text.strip_prefix("* ").unwrap_or(text);
     let (who, args) = split_tool_body(body);
     let glyph = match state {

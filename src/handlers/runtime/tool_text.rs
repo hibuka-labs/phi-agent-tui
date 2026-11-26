@@ -30,7 +30,7 @@ pub(super) fn notice_line(source: &str, text: &str) -> String {
 /// Build the structured block a tool attaches under its invocation line, or
 /// `None` when the call has no payload worth a block.
 ///
-/// Three shapes, and the split is deliberate (design §write):
+/// Four shapes, and the split is deliberate (design §write):
 /// - `edit_file` → [`LineDetail::Diff`] — an edit is a *transformation*, and
 ///   its evidence is never previewed away. Rendered in full, outside the
 ///   preview ladder.
@@ -41,8 +41,16 @@ pub(super) fn notice_line(source: &str, text: &str) -> String {
 ///   real old→new diff — an overwrite *is* a transformation.
 /// - `spawn_agent` → [`LineDetail::Folded`] holding the task brief. Also an
 ///   artifact (a briefing, not a change): the row keeps a gist of the head,
-///   the brief rides the ladder.
-pub(super) fn build_tool_detail(tool_name: &str, args_json: &str) -> Option<LineDetail> {
+///   the brief rides the ladder, whole.
+/// - `execute_command` → [`LineDetail::Folded`] holding the command, but only
+///   when the row could not show it whole (`body` holds the flattened command
+///   as the row rendered it; a command that fit needs no block). The row keeps
+///   its one-line contract, the elided tail comes back at full expansion.
+pub(super) fn build_tool_detail(
+    tool_name: &str,
+    args_json: &str,
+    body: &str,
+) -> Option<LineDetail> {
     let args: serde_json::Value = match serde_json::from_str(args_json) {
         Ok(v) => v,
         Err(e) => {
@@ -65,6 +73,25 @@ pub(super) fn build_tool_detail(tool_name: &str, args_json: &str) -> Option<Line
             char_count: task.chars().count(),
             duration_secs: None,
             meta_head,
+        });
+    }
+    // `execute_command` → the command pays back its elided tail. The row
+    // renders the command flattened and head-elided to the row budget; the
+    // fold marks that head *abbreviated* so full expansion restores the whole
+    // line. When the row already holds the command whole there is nothing to
+    // pay back and the block would only echo the row.
+    if tool_name == "execute_command" {
+        let command = args.get("command").and_then(|v| v.as_str())?;
+        let flat = command.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.is_empty() || body.contains(&flat) {
+            return None;
+        }
+        return Some(LineDetail::Folded {
+            raw: flat.clone(),
+            line_count: 1,
+            char_count: flat.chars().count(),
+            duration_secs: None,
+            meta_head: MetaHead::Abbreviated,
         });
     }
     let path = {
@@ -274,7 +301,21 @@ fn args_label(
         .unwrap_or(false);
     let mut parts: Vec<String> = Vec::new();
     let mut remaining = budget;
+    // `command` leads, bare: it IS the call (every other knob decorates it),
+    // and putting it first spends the row's columns on the payload instead of
+    // on flags. The rest keeps JSON (alphabetical) order.
+    if let Some(serde_json::Value::String(s)) = obj.get("command") {
+        let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat.is_empty() {
+            let shown = elide(&flat, remaining, Elide::Head);
+            remaining = remaining.saturating_sub(shown.width() + 2);
+            parts.push(shown);
+        }
+    }
     for (k, v) in obj {
+        if k == "command" {
+            continue;
+        }
         if SKIP.contains(&k.as_str()) {
             continue;
         }
@@ -295,8 +336,9 @@ fn args_label(
             serde_json::Value::String(s) if s.is_empty() => {}
             serde_json::Value::String(s) => {
                 // A command or a pattern is worth showing whole-ish; a bare name
-                // reads better without its key.
-                let bare = k == "name" || k == "pattern";
+                // reads better without its key. `task_id` is a call's handle
+                // (`bg_…`), self-identifying by shape like a basename.
+                let bare = k == "name" || k == "pattern" || k == "task_id";
                 let kv = if bare { String::new() } else { format!("{k}=") };
                 let avail = remaining.saturating_sub(kv.width());
                 let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -308,8 +350,20 @@ fn args_label(
                     parts.push(format!("{kv}{shown}"));
                 }
             }
-            serde_json::Value::Number(n) => parts.push(format!("{k}={n}")),
-            serde_json::Value::Bool(b) => parts.push(format!("{k}={b}")),
+            serde_json::Value::Number(n) => {
+                // Durations speak seconds/minutes, not raw milliseconds —
+                // `timeout_ms=180000` is machine talk on a human-facing row.
+                if let Some(stem) = k.strip_suffix("_ms") {
+                    let pretty = n.as_u64().map(fmt_ms).unwrap_or_else(|| n.to_string());
+                    parts.push(format!("{stem}={pretty}"));
+                } else {
+                    parts.push(format!("{k}={n}"));
+                }
+            }
+            // A flag carries information only when set — bare reads as the
+            // adjective it is (`background`, `wait`), never `flag=true`.
+            serde_json::Value::Bool(true) => parts.push(k.clone()),
+            serde_json::Value::Bool(false) => parts.push(format!("{k}=false")),
             serde_json::Value::Null => {}
             // Objects/arrays are structure, not values — they live in the
             // structured block or the log.
@@ -317,6 +371,43 @@ fn args_label(
         }
     }
     parts.join("  ")
+}
+
+/// Milliseconds in the unit a human would say: `180000` → `3m`, `12000` →
+/// `12s`. Sub-second stays raw (`500ms`) — rounding there would lie.
+fn fmt_ms(ms: u64) -> String {
+    if ms >= 60_000 && ms.is_multiple_of(60_000) {
+        format!("{}m", ms / 60_000)
+    } else if ms >= 1_000 && ms.is_multiple_of(1_000) {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Human label for a tool-result head when the head is a known status
+/// envelope — `display projection only`: `raw` keeps the envelope whole (the
+/// fold, selection and copy all read `raw`), this only decides what the meta
+/// row spells. Unknown heads come back `None` and render as themselves.
+pub(super) fn result_head_label(head: &str) -> Option<String> {
+    if let Some(rest) = head
+        .strip_prefix("[Command Failed (exit code: ")
+        .and_then(|r| r.strip_suffix(")]"))
+    {
+        return Some(format!("failed (exit {rest})"));
+    }
+    if let Some(rest) = head
+        .strip_prefix("[Command Timed Out after ")
+        .and_then(|r| r.strip_suffix("ms]"))
+    {
+        let secs = rest.parse::<u64>().ok().map(fmt_ms)?;
+        return Some(format!("timed out ({secs})"));
+    }
+    match head {
+        "[Command Timed Out]" | "[Tool Timeout]" => Some("timed out".to_string()),
+        "[Command Terminated]" => Some("terminated".to_string()),
+        _ => None,
+    }
 }
 
 /// Invocation-line body for a tool call: `tool_name` plus readable arguments.
@@ -463,41 +554,104 @@ pub(crate) fn agent_prefix(agent_id: Option<&str>) -> String {
     }
 }
 
-/// Settle the last still-running tool invocation in `output`: refill its state,
-/// and for a `write_file` overwrite swap the staged written-content block for a
-/// real old→new diff (an overwrite is a transformation, so it earns the same
+/// The tool name a call row names: the first word after the `* ` marker and
+/// any `[agent] ` sub-agent prefix — `* [agent] execute_command  args` and the
+/// spawn shorthand `* spawn_agent name - gist` both yield their tool name.
+fn row_tool_name(text: &str) -> &str {
+    let body = text.strip_prefix("* ").unwrap_or(text);
+    let body = body
+        .strip_prefix('[')
+        .and_then(|r| r.split_once("] "))
+        .map(|(_, rest)| rest)
+        .unwrap_or(body);
+    body.split(' ').next().unwrap_or(body)
+}
+
+/// Settle the invocation this result belongs to: refill its state, and for a
+/// `write_file` overwrite swap the staged written-content block for a real
+/// old→new diff (an overwrite is a transformation, so it earns the same
 /// always-full diff treatment an edit gets).
 ///
-/// Returns whether that invocation is the transcript's last line — i.e. the
-/// result about to be appended sits directly under its own call and can drop
-/// the redundant tool name.
+/// Pairing is by tool name, first-started wins. Parallel calls materialize
+/// together and finish in any order, so "the last running row" would settle
+/// the *wrong* call — both its state glyph and, for `write_file`, the diff
+/// swap. No call id travels on the events, so two same-name parallel calls
+/// still pair FIFO.
+///
+/// Returns whether the result may drop the redundant tool name: only when
+/// the name is uninformative — the call's block is all one tool (the name
+/// would just echo the call rows) and no prose separates the call from where
+/// the result lands. Mixed or far blocks keep the name as their attribution.
 pub(super) fn settle_tool_call(
     output: &mut [OutputLine<ShellToken>],
     settled: ToolState,
     details: Option<&serde_json::Value>,
+    tool_name: &str,
 ) -> bool {
     let inv_idx = output
         .iter()
-        .rposition(|l| l.kind == LineKind::Tool && l.tool_state == Some(ToolState::Running));
+        .position(|l| {
+            l.kind == LineKind::Tool
+                && l.tool_state == Some(ToolState::Running)
+                && row_tool_name(&l.text) == tool_name
+        })
+        .or_else(|| {
+            output
+                .iter()
+                .position(|l| l.kind == LineKind::Tool && l.tool_state == Some(ToolState::Running))
+        });
     let Some(idx) = inv_idx else {
         return false;
     };
-    let adjacent = idx + 1 == output.len();
+    // May the result drop its tool name? Only when the name carries no
+    // information: the call's block (the contiguous tool-row run around it)
+    // is all one tool — a name repeated there echoes the rows above — and
+    // no prose separates the call from where the result lands. A mixed block
+    // (parallel `execute_command` + `task_output`) keeps the name on every
+    // result: it is the only attribution the interleaved rows leave.
+    let mut block_start = idx;
+    while block_start > 0
+        && matches!(
+            output[block_start - 1].kind,
+            LineKind::Tool | LineKind::ToolResult
+        )
+    {
+        block_start -= 1;
+    }
+    let mut block_end = idx + 1;
+    while block_end < output.len()
+        && matches!(
+            output[block_end].kind,
+            LineKind::Tool | LineKind::ToolResult
+        )
+    {
+        block_end += 1;
+    }
+    let homogeneous = output[block_start..block_end]
+        .iter()
+        .filter(|l| l.kind == LineKind::Tool)
+        .all(|l| row_tool_name(&l.text) == tool_name);
+    let same_block = homogeneous
+        && output[idx + 1..]
+            .iter()
+            .all(|l| matches!(l.kind, LineKind::Tool | LineKind::ToolResult));
     let inv = &mut output[idx];
     inv.tool_state = Some(settled);
 
     // Overwrite is a transformation, so it earns a diff. The tool reports
     // `write_mode` + `old_content`; the new content is what we staged on the
     // line at `ActionStarted`.
-    let Some(det) = details else { return adjacent };
+    let Some(det) = details else {
+        return same_block;
+    };
     if det.get("write_mode").and_then(|v| v.as_str()) != Some("overwrite") {
-        return adjacent;
+        return same_block;
     }
     let Some(LineDetail::Folded {
         raw: new_content, ..
     }) = inv.detail.clone()
     else {
-        return adjacent;
+        return same_block;
     };
     let old = det
         .get("old_content")
@@ -512,5 +666,5 @@ pub(super) fn settle_tool_call(
     if !hunks.is_empty() {
         inv.detail = Some(LineDetail::Diff { path, hunks });
     }
-    adjacent
+    same_block
 }

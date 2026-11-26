@@ -41,6 +41,8 @@ pub(super) async fn agent_loop(
                 let _ = usage_tx.send(TuiEvent::Usage {
                     input_tokens: usage.prompt_tokens.unwrap_or(0).into(),
                     output_tokens: usage.completion_tokens.unwrap_or(0).into(),
+                    cache_read_tokens: usage.cache_read_tokens.map(|n| n.into()),
+                    total_tokens: usage.total_tokens.map(|n| n.into()),
                 });
             }
         });

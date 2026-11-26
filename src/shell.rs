@@ -428,7 +428,7 @@ impl Default for CopyTable {
             exit_dump_header: Arc::new(|facts| {
                 let turns = facts.turns;
                 format!(
-                    "── phimint {} · session {} · {} {} · {} tok ──",
+                    "── phimint {} · session {} · {} {} · {} tokens ──",
                     facts.version,
                     facts.session_id,
                     turns,

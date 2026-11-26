@@ -426,7 +426,7 @@ pub(super) fn render_thinking_panel(
     }
     title.push(Span::styled(
         format!(
-            " - {} - ~{} tok",
+            " - {} - ~{} tokens (est)",
             App::fmt_elapsed(elapsed),
             fmt_k(chars as u64 / 3)
         ),

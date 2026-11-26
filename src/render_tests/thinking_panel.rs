@@ -22,7 +22,10 @@ fn thinking_panel_renders_title_and_stays_out_of_transcript() {
     // Anchor on the panel TITLE ("thinking - …"), not the status bar's
     // "thinking..." spinner line.
     assert!(text.contains("thinking -"), "panel title missing:\n{text}");
-    assert!(text.contains("320 tok"), "token estimate missing:\n{text}");
+    assert!(
+        text.contains("320 tokens (est)"),
+        "token estimate missing:\n{text}"
+    );
     // The panel must NOT feed the transcript: committed lines unchanged.
     assert_eq!(app.transcript.len(), 1);
 }
@@ -102,7 +105,7 @@ fn committed_thought_folds_and_expands() {
     // No leading `>` — that marker belongs to user lines, and a summary
     // starting with `>` reads as something you typed.
     assert!(
-        text.contains("thinking - 5 lines - ~16 tok - 47s (Ctrl+O expand)"),
+        text.contains("thinking - 5 lines - ~16 tokens (est) - 47s (Ctrl+O expand)"),
         "summary missing:\n{text}"
     );
     assert!(

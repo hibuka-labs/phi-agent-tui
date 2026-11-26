@@ -25,17 +25,19 @@ pub(super) fn render_live_face(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_w = area.width as usize;
 
     // name 12–16 + flex activity; the files column is stripped.
-    const CHROME: usize = 3; // glyph+" ", one gap
     let name_wanted = views
         .iter()
         .map(|v| UnicodeWidthStr::width(v.name.as_str()))
         .max()
         .unwrap_or(0);
-    let (name_w, act_w) = task_layout::live_row_widths(inner_w.saturating_sub(CHROME), name_wanted);
+    let gap = task_layout::column_gap(inner_w, name_wanted);
+    // marker+" ", glyph+" ", one gap between name and activity.
+    let cols_budget = inner_w.saturating_sub(4 + gap);
+    let (name_w, act_w) = task_layout::live_row_widths(cols_budget, name_wanted);
 
     let mut lines: Vec<Line> = Vec::with_capacity(shown.len() + 1);
     for v in &shown {
-        lines.push(task_row_line(v, name_w, None, act_w, &theme));
+        lines.push(task_row_line(v, name_w, None, gap, act_w, &theme));
     }
     if let Some(overflow) = task_layout::overflow_line(hidden_more, hidden_done, inner_w) {
         lines.push(Line::from(Span::styled(
@@ -47,15 +49,18 @@ pub(super) fn render_live_face(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// One row's spans — shared by both faces (the live face passes
-/// `files_w: None`, which drops the files column and both `│` separators).
-/// Every cell is elided to its column then padded OUT to it, in display
-/// columns: `format!("{:<w$}")` pads by chars and would overshoot. A corpse
-/// dims; a failure remnant rides its tint (the strongest fact on the row);
-/// the pinned row takes the selection background.
+/// `files_w: None`, which drops the files column and its gap). Every cell is
+/// elided to its column then padded OUT to it, in display columns:
+/// `format!("{:<w$}")` pads by chars and would overshoot. The columns stand
+/// apart on `gap` whitespace plus their own padding — no rule characters
+/// between them (规则线不入列). A corpse dims; a failure remnant rides its
+/// tint (the strongest fact on the row); the pinned row takes the selection
+/// background.
 pub(super) fn task_row_line(
     v: &TaskRowView,
     name_w: usize,
     files_w: Option<usize>,
+    gap: usize,
     act_w: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -114,16 +119,24 @@ pub(super) fn task_row_line(
     ));
     if let Some(files_w) = files_w {
         spans.push(Span::styled(
-            format!("│ {}", task_layout::cell(&v.files, files_w, Elide::Head)),
+            format!(
+                "{}{}",
+                " ".repeat(gap),
+                task_layout::cell(&v.files, files_w, Elide::Head)
+            ),
             Style::default().fg(faint).bg(bg),
         ));
         spans.push(Span::styled(
-            format!("│ {}", task_layout::cell(&v.activity, act_w, act_mode)),
+            format!(
+                "{}{}",
+                " ".repeat(gap),
+                task_layout::cell(&v.activity, act_w, act_mode)
+            ),
             Style::default().fg(act_color).bg(bg),
         ));
     } else {
-        // Live face: no separators — one gap after the padded name column.
-        spans.push(Span::styled(" ".to_string(), Style::default().bg(bg)));
+        // Live face: no separator — the same gap after the padded name column.
+        spans.push(Span::styled(" ".repeat(gap), Style::default().bg(bg)));
         spans.push(Span::styled(
             task_layout::cell(&v.activity, act_w, act_mode),
             Style::default().fg(act_color).bg(bg),
@@ -143,10 +156,11 @@ pub(super) fn tint_color(tint: RowTint) -> Color {
     }
 }
 
-/// The framed panel: three columns `[sel][glyph][name] │ [files] │
-/// [activity]` (design mock; the time column is gone — done rows carry
-/// `done 2m13s` in their activity cell), squeezed right→left as the panel
-/// narrows (task_layout::column_widths). S1 draws dim borders and no cursor;
+/// The framed panel: three columns `[sel][glyph][name]  [files]  [activity]`
+/// (design mock; the time column is gone — done rows carry `done 2m13s` in
+/// their activity cell), separated by whitespace only (task_layout::
+/// column_gap), squeezed right→left as the panel narrows
+/// (task_layout::column_widths). S1 draws dim borders and no cursor;
 /// S2 draws the `>` cursor on the selected row with normal borders. Rows are
 /// the design's 6-row scroll window (`window_offset`), spawn-stable.
 pub(super) fn render_frame_face(f: &mut Frame, app: &mut App, area: Rect) {
@@ -161,14 +175,17 @@ pub(super) fn render_frame_face(f: &mut Frame, app: &mut App, area: Rect) {
     let title = task_layout::panel_title(total, app.task_panel.unacked_failures.len());
     // #3 任务面板框只留上边框: the frame keeps its top rule only — the rows
     // read as a section under that rule, not as a box. The title and the
-    // close hint ride that one rule, so the row budget shrinks by one.
+    // close hint ride that one rule, so the row budget shrinks by one. Both
+    // are flanked by a rule stub and inset from the panel's endpoints
+    // (横条夹字，不顶两端) — the labels read as stations along the rule, not
+    // as caps glued to its ends.
     let mut block = Block::default()
         .borders(Borders::TOP)
         .border_type(BorderType::Plain)
-        .title(title)
+        .title(format!("─ {title} "))
         .title(
             Line::from(Span::styled(
-                task_layout::FRAME_CLOSE_HINT,
+                format!(" {} ─", task_layout::FRAME_CLOSE_HINT),
                 Style::default().fg(theme.hint),
             ))
             .right_aligned(),
@@ -203,17 +220,20 @@ pub(super) fn render_frame_face(f: &mut Frame, app: &mut App, area: Rect) {
         .min(total.saturating_sub(view_rows.max(1)));
     let end = (off + view_rows).min(total);
 
-    // Columns in DISPLAY COLUMNS: name 12–16 (`Elide::Head` — the tail of a
-    // name is its least identifying part), files 8, activity flex. The sel/
-    // glyph slots and the `│ ` separators are fixed chrome.
-    const CHROME: usize = 8; // marker+" ", glyph+" ", two "│ "
+    // Columns in DISPLAY COLUMNS: name 12–28 (`Elide::Head` — the tail of a
+    // name is its least identifying part), files 12, activity flex. The
+    // sel/glyph slots are fixed chrome; the columns stand apart on
+    // whitespace (column_gap), which widens with the panel so the row does
+    // not read as one left-packed clump.
     let inner_w = inner.width as usize;
-    let cols_budget = inner_w.saturating_sub(CHROME);
     let name_wanted = views
         .iter()
         .map(|v| UnicodeWidthStr::width(v.name.as_str()))
         .max()
         .unwrap_or(0);
+    let gap = task_layout::column_gap(inner_w, name_wanted);
+    // marker+" ", glyph+" ", two inter-column gaps.
+    let cols_budget = inner_w.saturating_sub(4 + 2 * gap);
     let (name_w, files_w, act_w) = task_layout::column_widths(cols_budget, name_wanted);
 
     // The frame's window over the display set; `view_rows` is recorded so
@@ -222,7 +242,7 @@ pub(super) fn render_frame_face(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .take(end)
         .skip(off)
-        .map(|v| task_row_line(v, name_w, Some(files_w), act_w, &theme))
+        .map(|v| task_row_line(v, name_w, Some(files_w), gap, act_w, &theme))
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
 }

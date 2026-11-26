@@ -390,18 +390,33 @@ pub fn window_offset(offset: usize, sel: Option<usize>, total: usize, view_rows:
     off.min(max_off)
 }
 
+/// Whitespace between the row's columns, in display columns. The columns are
+/// held apart by this gap and their own padding alone — no rule characters
+/// (规则线不入列). The gap shares what the fixed columns leave over with the
+/// activity column 1:1:2, so a wide panel spreads its three columns across
+/// the width instead of packing them at the left edge (列随框走); floored at
+/// 2 so a narrow panel still separates its cells.
+pub fn column_gap(inner_w: usize, name_wanted: usize) -> usize {
+    let name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
+    // marker+" " + glyph+" " + name + files = everything but the two gaps
+    // and the flex activity column.
+    let slack = inner_w.saturating_sub(4 + name_w + FILES_W);
+    (slack / 4).max(2)
+}
+
+/// Fixed column floors/caps (display columns) — #13 任务列宽: the name is
+/// the row's identity (12–28), the files column is 12.
+const NAME_MIN: usize = 12;
+const NAME_MAX: usize = 28;
+const FILES_W: usize = 12;
+
 /// Row column widths `(name, files, activity)` for a panel `inner_w` wide,
 /// squeezed right→left (design「列收缩」): the activity column is the flex
 /// column and absorbs the shrink first, then the files column, then the name
 /// down to its 12-column floor. Measured in display columns.
 pub fn column_widths(inner_w: usize, name_wanted: usize) -> (usize, usize, usize) {
-    // #13 任务列宽: the name column widened to ~28 (it is the row's identity),
-    // the files column to 12. The squeeze order is unchanged — activity
-    // flexes first, then files, then the name.
-    const NAME_MIN: usize = 12;
-    const NAME_MAX: usize = 28;
-    const FILES_W: usize = 12;
-
+    // The squeeze order is unchanged — activity flexes first, then files,
+    // then the name.
     let mut name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
     let mut files_w = FILES_W;
     // Activity flexes first (it is the rightmost column).
@@ -422,9 +437,6 @@ pub fn column_widths(inner_w: usize, name_wanted: usize) -> (usize, usize, usize
 /// files column stripped (Rev 2026-11-04: the row render reuses the frame's row render 剥列).
 pub fn live_row_widths(inner_w: usize, name_wanted: usize) -> (usize, usize) {
     // #13 任务列宽: the live face shares the frame's name width.
-    const NAME_MIN: usize = 12;
-    const NAME_MAX: usize = 28;
-
     let mut name_w = name_wanted.clamp(NAME_MIN, NAME_MAX);
     let mut act_w = inner_w.saturating_sub(name_w);
     if name_w > inner_w {
