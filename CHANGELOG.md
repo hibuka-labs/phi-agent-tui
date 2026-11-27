@@ -4,6 +4,35 @@ All notable changes to phi-agent-tui.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
+### Added
+- **Scrolling no longer flips your input history.** Some terminals (FinalShell
+  on macOS) translate one wheel gesture into a real wheel event plus
+  synthesized bare ↑/↓ keys; the arrow half reached the composer and jumped
+  to an old entry, so a scroll read as "the composer flipped". `ShellSpec`
+  gains `scroll_arrow_guard`: a bare ↑/↓ that rides in on wheel activity (same
+  drained batch, or within 300ms of the last wheel event) is dropped, while
+  real keystrokes and Alt+↑/↓ cursor movement pass through. The batch is
+  pre-scanned before any key dispatch, so the decision does not depend on
+  which stream the terminal sends first.
+- **The status bar shows the window the provider measured.** A usage event
+  carries the provider's own accounting for the latest call, so the status
+  bar reports that number instead of a local estimate — and takes the
+  provider total when there is one, because on the OpenAI protocol
+  `prompt_tokens` already includes the cache-served slice and summing the
+  fields would double-count it.
+
+### Changed
+- **Verdict and notice rows are quiet chrome.** One style run over the whole
+  row at the theme's chrome slot; the text is unchanged, so rows still
+  soft-wrap like prose, and the exit dump keeps fixed banner art out of the
+  scrollback. Tool rows fold the command detail only when the row could not
+  show it whole.
+- **`phi-agent` requirement bumped from 0.24.1 to 0.25.0** and
+  **`phi-kernel-tools` from 0.16.1 to 0.17.0** — one version of each family
+  crate in the graph.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

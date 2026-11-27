@@ -1,6 +1,6 @@
 [package]
 name = "phi-agent-tui"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Reusable terminal-app shell for LLM agent products: event loop, transcript translation, theme, approval/ask interaction machinery, and the ShellSpec/ShellHandles wire-up. No product strategy lives here."
 license = "MIT OR Apache-2.0"
@@ -13,13 +13,13 @@ categories = ["command-line-interface", "development-tools"]
 # interaction vocabulary (ApprovalItem / AskAnswer / AskOption / ApprovalHandler).
 # The shell consumes it; it never builds an agent (design notes §5: the product
 # assembles its own agent and hands it in).
-phi-agent = { version = "0.24.0", features = ["skill", "multi-agent"] }
+phi-agent = { version = "0.25.0", features = ["skill", "multi-agent"] }
 # Chat-TUI component layer (lines / transcript / stream / wrap / viewport /
 # selection / picker / completer / markdown / diff) — pure widgets, no agent
 # semantics (phi-tui's own charter).
 phi-tui = { version = "0.5.0" }
 # Background shell task registry (the quit path shuts it down) + tail reader.
-phi-kernel-tools = { version = "0.16.0", features = ["shell"] }
+phi-kernel-tools = { version = "0.17.0", features = ["shell"] }
 # Per-turn token usage telemetry + session metrics (observability = mechanism).
 phi-telemetry = { version = "0.10.0" }
 # Log sinks; the shell re-points them at the resumed session's log file.
@@ -55,3 +55,4 @@ tempfile = "3"
 # Test fixtures for the paste pipeline (hand-rolled PNG bytes would only pin
 # our own byte twiddling, not the reader).
 image = { version = "0.25", default-features = false, features = ["png"] }
+
